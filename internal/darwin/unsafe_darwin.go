@@ -9,11 +9,6 @@ import "unsafe"
 // Implemented in assembly to avoid the go vet unsafeptr false positive.
 func derefUintptr(addr uintptr) uintptr
 
-// derefUint64 reads the uint64 value at the C library address addr.
-// addr must point to OS/C library memory that the GC does not manage.
-// Implemented in assembly to avoid the go vet unsafeptr false positive.
-func derefUint64(addr uintptr) uint64
-
 // copyBytesFromC copies n bytes from the C memory address src into a new Go []byte.
 // src must point to C/CF-managed memory that the GC does not manage.
 // This avoids the go vet unsafeptr false positive by routing through
