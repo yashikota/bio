@@ -63,6 +63,7 @@ var (
 	kSecUseDataProtectionKeychain                  uintptr
 	kCFBooleanTrue                                 uintptr
 	kCFBooleanFalse                                uintptr
+	kSecAccessControlBiometryAny                   uint64
 	kSecAccessControlBiometryCurrentSet            uint64
 	kSecAccessControlPrivateKeyUsage               uint64
 	kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly uintptr
@@ -168,6 +169,7 @@ func loadSecurity() {
 		kSecValueRef = loadPtr(secHandle, "kSecValueRef")
 
 		// Integer flag constants
+		kSecAccessControlBiometryAny = loadFlags(secHandle, "kSecAccessControlBiometryAny")
 		kSecAccessControlBiometryCurrentSet = loadFlags(secHandle, "kSecAccessControlBiometryCurrentSet")
 		kSecAccessControlPrivateKeyUsage = loadFlags(secHandle, "kSecAccessControlPrivateKeyUsage")
 	})
@@ -239,10 +241,15 @@ func CreateSecureEnclaveKey(label string, tag []byte) (secKeyRef, error) {
 
 	// Create access control: biometry + private key usage
 	var acErr cfErrorRef
+	defer func() {
+		if acErr != 0 {
+			fnCFRelease(cfTypeRef(acErr))
+		}
+	}()
 	ac := fnSecAccessControlCreateWithFlags(
 		kCFAllocatorDefault,
 		kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
-		kSecAccessControlBiometryCurrentSet|kSecAccessControlPrivateKeyUsage,
+		kSecAccessControlBiometryAny|kSecAccessControlPrivateKeyUsage,
 		&acErr,
 	)
 	if ac == 0 {
@@ -276,6 +283,11 @@ func CreateSecureEnclaveKey(label string, tag []byte) (secKeyRef, error) {
 	dictSet(params, kSecPrivateKeyAttrs, uintptr(privAttrs))
 
 	var keyErr cfErrorRef
+	defer func() {
+		if keyErr != 0 {
+			fnCFRelease(cfTypeRef(keyErr))
+		}
+	}()
 	key := fnSecKeyCreateRandomKey(cfDictionaryRef(params), &keyErr)
 	if key == 0 {
 		return 0, fmt.Errorf("darwin: SecKeyCreateRandomKey failed")
@@ -300,6 +312,11 @@ func ExportPublicKeyCOSE(privKey secKeyRef) ([]byte, error) {
 	defer fnCFRelease(cfTypeRef(pubKey))
 
 	var exportErr cfErrorRef
+	defer func() {
+		if exportErr != 0 {
+			fnCFRelease(cfTypeRef(exportErr))
+		}
+	}()
 	rawData := fnSecKeyCopyExternalRepresentation(pubKey, &exportErr)
 	if rawData == 0 {
 		return nil, fmt.Errorf("darwin: SecKeyCopyExternalRepresentation failed")
@@ -338,6 +355,11 @@ func Sign(privKey secKeyRef, dataToSign []byte) ([]byte, error) {
 	defer fnCFRelease(cfTypeRef(data))
 
 	var sigErr cfErrorRef
+	defer func() {
+		if sigErr != 0 {
+			fnCFRelease(cfTypeRef(sigErr))
+		}
+	}()
 	sigData := fnSecKeyCreateSignature(privKey, alg, data, &sigErr)
 	if sigData == 0 {
 		return nil, fmt.Errorf("darwin: SecKeyCreateSignature failed")
