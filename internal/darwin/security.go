@@ -48,6 +48,11 @@ var (
 	fnSecItemCopyMatching              func(query cfDictionaryRef, result *uintptr) int32
 	fnSecItemAdd                       func(attrs cfDictionaryRef, result *uintptr) int32
 
+	// CFError inspection
+	fnCFErrorGetCode        func(err cfErrorRef) int64
+	fnCFErrorCopyDescription func(err cfErrorRef) cfStringRef
+	fnCFStringGetCString    func(s cfStringRef, buf uintptr, bufSize int, encoding uint32) bool
+
 	// CF constants loaded via Dlsym
 	kCFAllocatorDefault                            uintptr
 	kSecAttrKeyTypeECSECPrimeRandom                uintptr
@@ -65,6 +70,10 @@ var (
 	kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly uintptr
 	kSecKeyAlgorithmECDSASignatureMessageX962SHA256 uintptr
 	kSecPrivateKeyAttrs                             uintptr
+
+	// CF dictionary callbacks (must be passed to CFDictionaryCreateMutable)
+	kCFTypeDictionaryKeyCallBacks   uintptr
+	kCFTypeDictionaryValueCallBacks uintptr
 
 	// For Keychain queries
 	kSecClass         uintptr
@@ -123,6 +132,9 @@ func loadSecurity() {
 		purego.RegisterLibFunc(&fnSecItemDelete, secHandle, "SecItemDelete")
 		purego.RegisterLibFunc(&fnSecItemCopyMatching, secHandle, "SecItemCopyMatching")
 		purego.RegisterLibFunc(&fnSecItemAdd, secHandle, "SecItemAdd")
+		purego.RegisterLibFunc(&fnCFErrorGetCode, cfHandle, "CFErrorGetCode")
+		purego.RegisterLibFunc(&fnCFErrorCopyDescription, cfHandle, "CFErrorCopyDescription")
+		purego.RegisterLibFunc(&fnCFStringGetCString, cfHandle, "CFStringGetCString")
 
 		// loadPtr loads a pointer-type CF/Sec constant (CFStringRef, etc.).
 		// Dlsym returns the address of the symbol; we dereference to get the actual value.
@@ -152,6 +164,20 @@ func loadSecurity() {
 		kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly = loadPtr(secHandle, "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly")
 		kSecKeyAlgorithmECDSASignatureMessageX962SHA256 = loadPtr(secHandle, "kSecKeyAlgorithmECDSASignatureMessageX962SHA256")
 		kSecPrivateKeyAttrs = loadPtr(secHandle, "kSecPrivateKeyAttrs")
+		// kCFTypeDictionaryKeyCallBacks/ValueCallBacks are structs, not pointer-typed variables.
+		// Dlsym returns the struct's address directly — do NOT dereference (unlike CFStringRef constants).
+		sym, symErr := purego.Dlsym(cfHandle, "kCFTypeDictionaryKeyCallBacks")
+		if symErr != nil {
+			secErr = fmt.Errorf("darwin: Dlsym kCFTypeDictionaryKeyCallBacks: %w", symErr)
+			return
+		}
+		kCFTypeDictionaryKeyCallBacks = sym
+		sym, symErr = purego.Dlsym(cfHandle, "kCFTypeDictionaryValueCallBacks")
+		if symErr != nil {
+			secErr = fmt.Errorf("darwin: Dlsym kCFTypeDictionaryValueCallBacks: %w", symErr)
+			return
+		}
+		kCFTypeDictionaryValueCallBacks = sym
 		kSecClass = loadPtr(secHandle, "kSecClass")
 		kSecClassKey = loadPtr(secHandle, "kSecClassKey")
 		kSecReturnRef = loadPtr(secHandle, "kSecReturnRef")
@@ -160,6 +186,29 @@ func loadSecurity() {
 		kSecValueRef = loadPtr(secHandle, "kSecValueRef")
 
 	})
+}
+
+// cfErrorString extracts a human-readable description from a CFErrorRef.
+func cfErrorString(e cfErrorRef) string {
+	if e == 0 {
+		return "unknown"
+	}
+	code := fnCFErrorGetCode(e)
+	desc := fnCFErrorCopyDescription(e)
+	if desc == 0 {
+		return fmt.Sprintf("code=%d", code)
+	}
+	defer fnCFRelease(cfTypeRef(desc))
+	buf := make([]byte, 256)
+	fnCFStringGetCString(desc, uintptr(unsafe.Pointer(&buf[0])), len(buf), kCFStringEncodingUTF8)
+	msg := string(buf[:])
+	if i := len(msg); i > 0 {
+		for i > 0 && msg[i-1] == 0 {
+			i--
+		}
+		msg = msg[:i]
+	}
+	return fmt.Sprintf("code=%d %s", code, msg)
 }
 
 // cfString creates a CFStringRef from a Go string. Caller must CFRelease.
@@ -200,7 +249,7 @@ func cfInt32(n int32) cfNumberRef {
 
 // cfMutableDict creates an empty CFMutableDictionary. Caller must CFRelease.
 func cfMutableDict(capacity int) cfMutableDictionaryRef {
-	return fnCFDictionaryCreateMutable(kCFAllocatorDefault, capacity, 0, 0)
+	return fnCFDictionaryCreateMutable(kCFAllocatorDefault, capacity, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks)
 }
 
 // dictSet adds a key-value pair to a CFMutableDictionary.
@@ -217,38 +266,17 @@ func GenerateCredentialID() ([]byte, error) {
 	return id, nil
 }
 
-// CreateSecureEnclaveKey creates an EC P-256 key in the Secure Enclave bound to biometric auth.
+// CreateBiometricKey creates an EC P-256 key stored in the default Keychain.
+// Biometric verification is handled separately by the caller (LAContext.evaluatePolicy)
+// before calling Sign. This avoids the keychain-access-groups entitlement required
+// for Secure Enclave or access-control-bound keys.
 // label is used as kSecAttrLabel. tag is used as kSecAttrApplicationTag for Keychain lookup.
 // Returns the private key ref (caller must CFRelease via ReleaseKey).
-func CreateSecureEnclaveKey(label string, tag []byte) (secKeyRef, error) {
+func CreateBiometricKey(label string, tag []byte) (secKeyRef, error) {
 	loadSecurity()
 	if secErr != nil {
 		return 0, secErr
 	}
-
-	// Create access control: biometry + private key usage
-	var acErr cfErrorRef
-	defer func() {
-		if acErr != 0 {
-			fnCFRelease(cfTypeRef(acErr))
-		}
-	}()
-	ac := fnSecAccessControlCreateWithFlags(
-		kCFAllocatorDefault,
-		kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
-		kSecAccessControlBiometryAny|kSecAccessControlPrivateKeyUsage,
-		&acErr,
-	)
-	if ac == 0 {
-		return 0, fmt.Errorf("darwin: SecAccessControlCreateWithFlags failed")
-	}
-	defer fnCFRelease(cfTypeRef(ac))
-
-	// Private key attributes sub-dictionary
-	privAttrs := cfMutableDict(4)
-	defer fnCFRelease(cfTypeRef(privAttrs))
-	dictSet(privAttrs, kSecAttrIsPermanent, kCFBooleanTrue)
-	dictSet(privAttrs, kSecAttrAccessControl, uintptr(ac))
 
 	cfLabel := cfString(label)
 	defer fnCFRelease(cfTypeRef(cfLabel))
@@ -259,14 +287,17 @@ func CreateSecureEnclaveKey(label string, tag []byte) (secKeyRef, error) {
 	keySizeBits := cfInt32(256)
 	defer fnCFRelease(cfTypeRef(keySizeBits))
 
-	// Key generation parameters
-	params := cfMutableDict(8)
+	// Private key attributes: permanent storage, tagged for later lookup.
+	privAttrs := cfMutableDict(4)
+	defer fnCFRelease(cfTypeRef(privAttrs))
+	dictSet(privAttrs, kSecAttrIsPermanent, kCFBooleanTrue)
+	dictSet(privAttrs, kSecAttrApplicationTag, uintptr(cfTag))
+	dictSet(privAttrs, kSecAttrLabel, uintptr(cfLabel))
+
+	params := cfMutableDict(5)
 	defer fnCFRelease(cfTypeRef(params))
 	dictSet(params, kSecAttrKeyType, uintptr(kSecAttrKeyTypeECSECPrimeRandom))
 	dictSet(params, kSecAttrKeySizeInBits, uintptr(keySizeBits))
-	dictSet(params, kSecAttrTokenID, uintptr(kSecAttrTokenIDSecureEnclave))
-	dictSet(params, kSecAttrLabel, uintptr(cfLabel))
-	dictSet(params, kSecAttrApplicationTag, uintptr(cfTag))
 	dictSet(params, kSecPrivateKeyAttrs, uintptr(privAttrs))
 
 	var keyErr cfErrorRef
@@ -277,7 +308,7 @@ func CreateSecureEnclaveKey(label string, tag []byte) (secKeyRef, error) {
 	}()
 	key := fnSecKeyCreateRandomKey(cfDictionaryRef(params), &keyErr)
 	if key == 0 {
-		return 0, fmt.Errorf("darwin: SecKeyCreateRandomKey failed")
+		return 0, fmt.Errorf("darwin: SecKeyCreateRandomKey failed: %s", cfErrorString(keyErr))
 	}
 	return key, nil
 }

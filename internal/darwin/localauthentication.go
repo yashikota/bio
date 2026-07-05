@@ -10,17 +10,19 @@ import (
 	"github.com/ebitengine/purego/objc"
 )
 
+
 var (
 	laOnce  sync.Once
 	laErr   error
 
-	classLAContext       objc.Class
-	selAlloc             objc.SEL
-	selInit              objc.SEL
-	selCanEvaluatePolicy objc.SEL
-	selBiometryType      objc.SEL
-	selRelease           objc.SEL
-	selCode              objc.SEL
+	classLAContext            objc.Class
+	selAlloc                  objc.SEL
+	selInit                   objc.SEL
+	selCanEvaluatePolicy      objc.SEL
+	selBiometryType           objc.SEL
+	selRelease                objc.SEL
+	selCode                   objc.SEL
+	selEvaluatePolicyWithReply objc.SEL
 )
 
 func loadLA() {
@@ -43,7 +45,43 @@ func loadLA() {
 		selBiometryType = objc.RegisterName("biometryType")
 		selRelease = objc.RegisterName("release")
 		selCode = objc.RegisterName("code")
+		selEvaluatePolicyWithReply = objc.RegisterName("evaluatePolicy:localizedReason:reply:")
 	})
+}
+
+// Authenticate calls LAContext evaluatePolicy:localizedReason:reply: and blocks until
+// the biometric prompt completes or fails. Returns a LAError on denial/cancel.
+func Authenticate(policy int64, reason string) error {
+	loadLA()
+	if laErr != nil {
+		return laErr
+	}
+
+	ctx := objc.ID(classLAContext).Send(selAlloc).Send(selInit)
+	defer ctx.Send(selRelease)
+
+	type result struct {
+		success bool
+		errCode int64
+	}
+	ch := make(chan result, 1)
+
+	block := objc.NewBlock(func(_ objc.Block, success bool, errPtr uintptr) {
+		var code int64
+		if !success && errPtr != 0 {
+			code = objc.Send[int64](objc.ID(errPtr), selCode)
+		}
+		ch <- result{success: success, errCode: code}
+	})
+
+	nsReason := NSStringFromGoString(reason)
+	ctx.Send(selEvaluatePolicyWithReply, policy, nsReason, block)
+
+	res := <-ch
+	if !res.success {
+		return NewLAError("Authenticate", res.errCode)
+	}
+	return nil
 }
 
 // CheckAvailability calls LAContext canEvaluatePolicy:error: and returns biometryType.

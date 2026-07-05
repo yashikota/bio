@@ -102,9 +102,18 @@ func (a *darwinAuthenticator) MakeCredential(ctx context.Context, opts MakeCrede
 	// Build Keychain application tag
 	tag := darwin.KeychainTag(opts.RP.ID, credID)
 
-	// Create key in Secure Enclave (biometric prompt shown by OS when key is used)
+	// Authenticate with biometrics before creating the key
+	reason := a.cfg.localizedReason
+	if reason == "" {
+		reason = "Register with " + opts.RP.Name
+	}
+	if authErr := darwin.Authenticate(darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics, reason); authErr != nil {
+		return nil, mapLAError("MakeCredential", authErr)
+	}
+
+	// Create EC P-256 key stored in Keychain (biometric confirmed above)
 	label := opts.RP.Name + "/" + opts.User.Name
-	privKey, err := darwin.CreateSecureEnclaveKey(label, tag)
+	privKey, err := darwin.CreateBiometricKey(label, tag)
 	if err != nil {
 		return nil, err
 	}
@@ -187,6 +196,15 @@ func (a *darwinAuthenticator) GetAssertion(ctx context.Context, opts GetAssertio
 		return nil, ErrNoCredentials
 	}
 	defer darwin.ReleaseKey(privKey)
+
+	// Authenticate with biometrics before signing
+	reason := a.cfg.localizedReason
+	if reason == "" {
+		reason = "Sign in to " + opts.RPID
+	}
+	if authErr := darwin.Authenticate(darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics, reason); authErr != nil {
+		return nil, mapLAError("GetAssertion", authErr)
+	}
 
 	// Build authenticator data (no attested credential data for assertions)
 	flags := byte(darwin.FlagUP | darwin.FlagUV)
