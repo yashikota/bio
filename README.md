@@ -169,7 +169,3 @@ go run ./examples/check     # check biometric availability
 go run ./examples/register  # create a credential
 go run ./examples/login     # authenticate with the credential
 ```
-
-## License
-
-MIT — see [LICENSE](./LICENSE).
