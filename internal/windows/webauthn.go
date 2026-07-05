@@ -5,6 +5,7 @@ package winwebauthn
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -183,6 +184,16 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 			uintptr(unsafe.Pointer(&opts)),
 			uintptr(unsafe.Pointer(&attestation)),
 		)
+		// Prevent GC from collecting Go-allocated structs before the blocking DLL call returns.
+		runtime.KeepAlive(&rp)
+		runtime.KeepAlive(&user)
+		runtime.KeepAlive(&coseCredParams)
+		runtime.KeepAlive(coseParams)
+		runtime.KeepAlive(&clientData)
+		runtime.KeepAlive(&opts)
+		if len(params.ExcludeIDs) > 0 {
+			runtime.KeepAlive(opts.ExcludeCredentialList)
+		}
 		if err := HRESULTToError("MakeCredential", hr); err != nil {
 			ch <- result{err: err}
 			return
@@ -209,13 +220,13 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 func copyAttestationResult(a *CredentialAttestation) *MakeCredentialResult {
 	res := &MakeCredentialResult{}
 	if a.CredentialIDLen > 0 && a.CredentialID != nil {
-		res.CredentialID = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.CredentialID))[:a.CredentialIDLen]...)
+		res.CredentialID = append([]byte(nil), unsafe.Slice(a.CredentialID, a.CredentialIDLen)...)
 	}
 	if a.AttestationObjectLen > 0 && a.AttestationObject != nil {
-		res.AttestationObject = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.AttestationObject))[:a.AttestationObjectLen]...)
+		res.AttestationObject = append([]byte(nil), unsafe.Slice(a.AttestationObject, a.AttestationObjectLen)...)
 	}
 	if a.AuthenticatorDataLen > 0 && a.AuthenticatorData != nil {
-		res.AuthenticatorData = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.AuthenticatorData))[:a.AuthenticatorDataLen]...)
+		res.AuthenticatorData = append([]byte(nil), unsafe.Slice(a.AuthenticatorData, a.AuthenticatorDataLen)...)
 	}
 	return res
 }
@@ -310,6 +321,13 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 			uintptr(unsafe.Pointer(&opts)),
 			uintptr(unsafe.Pointer(&assertion)),
 		)
+		// Prevent GC from collecting Go-allocated structs before the blocking DLL call returns.
+		runtime.KeepAlive(rpID)
+		runtime.KeepAlive(&clientData)
+		runtime.KeepAlive(&opts)
+		if len(params.AllowIDs) > 0 {
+			runtime.KeepAlive(opts.AllowCredentialList)
+		}
 		if err := HRESULTToError("GetAssertion", hr); err != nil {
 			ch <- result{err: err}
 			return
@@ -336,16 +354,16 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 func copyAssertionResult(a *Assertion) *GetAssertionResult {
 	res := &GetAssertionResult{}
 	if a.AuthenticatorDataLen > 0 && a.AuthenticatorData != nil {
-		res.AuthenticatorData = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.AuthenticatorData))[:a.AuthenticatorDataLen]...)
+		res.AuthenticatorData = append([]byte(nil), unsafe.Slice(a.AuthenticatorData, a.AuthenticatorDataLen)...)
 	}
 	if a.SignatureLen > 0 && a.Signature != nil {
-		res.Signature = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.Signature))[:a.SignatureLen]...)
+		res.Signature = append([]byte(nil), unsafe.Slice(a.Signature, a.SignatureLen)...)
 	}
 	if a.Credential.IDLen > 0 && a.Credential.ID != nil {
-		res.CredentialID = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.Credential.ID))[:a.Credential.IDLen]...)
+		res.CredentialID = append([]byte(nil), unsafe.Slice(a.Credential.ID, a.Credential.IDLen)...)
 	}
 	if a.UserIDLen > 0 && a.UserID != nil {
-		res.UserID = append([]byte(nil), (*[1 << 20]byte)(unsafe.Pointer(a.UserID))[:a.UserIDLen]...)
+		res.UserID = append([]byte(nil), unsafe.Slice(a.UserID, a.UserIDLen)...)
 	}
 	return res
 }

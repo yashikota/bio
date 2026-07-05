@@ -192,8 +192,11 @@ func (a *darwinAuthenticator) GetAssertion(ctx context.Context, opts GetAssertio
 	flags := byte(darwin.FlagUP | darwin.FlagUV)
 	authData := darwin.BuildGetAssertionAuthData(opts.RPID, flags, 0)
 
-	// Sign: authData || clientDataHash (FIDO2 spec §6.3.3)
-	dataToSign := append(authData, cdHash...)
+	// Sign: authData || clientDataHash (FIDO2 spec §6.3.3).
+	// Use make+copy to avoid mutating authData's backing array (returned in Assertion).
+	dataToSign := make([]byte, len(authData)+len(cdHash))
+	copy(dataToSign, authData)
+	copy(dataToSign[len(authData):], cdHash)
 	sig, err := darwin.Sign(privKey, dataToSign)
 	if err != nil {
 		return nil, err

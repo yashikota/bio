@@ -19,6 +19,9 @@ func derefUint64(addr uintptr) uint64
 // This avoids the go vet unsafeptr false positive by routing through
 // a pointer to a Go-allocated buffer rather than converting the C pointer directly.
 func copyBytesFromC(src uintptr, n int) []byte {
+	if n <= 0 {
+		return nil
+	}
 	dst := make([]byte, n)
 	copyFromC(src, unsafe.Pointer(&dst[0]), n)
 	return dst
