@@ -75,12 +75,15 @@ func mapBiometryType(t int64) BiometryType {
 	}
 }
 
-func (a *darwinAuthenticator) MakeCredential(_ context.Context, opts MakeCredentialOptions) (*Credential, error) {
+func (a *darwinAuthenticator) MakeCredential(ctx context.Context, opts MakeCredentialOptions) (*Credential, error) {
 	if len(opts.Challenge) == 0 {
 		return nil, ErrInvalidParameter
 	}
 	if opts.RP.ID == "" {
 		return nil, ErrInvalidParameter
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Build clientDataJSON
@@ -136,7 +139,7 @@ func (a *darwinAuthenticator) MakeCredential(_ context.Context, opts MakeCredent
 	}, nil
 }
 
-func (a *darwinAuthenticator) GetAssertion(_ context.Context, opts GetAssertionOptions) (*Assertion, error) {
+func (a *darwinAuthenticator) GetAssertion(ctx context.Context, opts GetAssertionOptions) (*Assertion, error) {
 	if len(opts.Challenge) == 0 {
 		return nil, ErrInvalidParameter
 	}
@@ -151,6 +154,10 @@ func (a *darwinAuthenticator) GetAssertion(_ context.Context, opts GetAssertionO
 		return nil, err
 	}
 	cdHash := clientDataHash(clientDataJSON)
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Find the private key. If AllowCredentials is empty, credential scan is not supported.
 	if len(opts.AllowCredentials) == 0 {
