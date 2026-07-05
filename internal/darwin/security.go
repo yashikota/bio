@@ -62,9 +62,6 @@ var (
 	kSecUseDataProtectionKeychain                  uintptr
 	kCFBooleanTrue                                 uintptr
 	kCFBooleanFalse                                uintptr
-	kSecAccessControlBiometryAny                   uint64
-	kSecAccessControlBiometryCurrentSet            uint64
-	kSecAccessControlPrivateKeyUsage               uint64
 	kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly uintptr
 	kSecKeyAlgorithmECDSASignatureMessageX962SHA256 uintptr
 	kSecPrivateKeyAttrs                             uintptr
@@ -81,6 +78,12 @@ var (
 const (
 	kCFStringEncodingUTF8 = uint32(0x08000100)
 	kCFNumberSInt32Type   = 3
+
+	// SecAccessControlCreateFlags enum values (CF_OPTIONS, not exported as dylib symbols).
+	// Source: Security/SecAccessControl.h
+	kSecAccessControlBiometryAny        uint64 = 1 << 1  // kSecAccessControlTouchIDAny renamed
+	kSecAccessControlBiometryCurrentSet uint64 = 1 << 3  // kSecAccessControlTouchIDCurrentSet renamed
+	kSecAccessControlPrivateKeyUsage    uint64 = 1 << 30
 )
 
 // OSStatus values.
@@ -133,17 +136,6 @@ func loadSecurity() {
 			return derefUintptr(sym)
 		}
 
-		// loadFlags loads an integer-flag constant (SecAccessControlFlags, etc.).
-		// derefUint64 is implemented in assembly to avoid go vet unsafeptr false positive.
-		loadFlags := func(handle uintptr, name string) uint64 {
-			sym, err := purego.Dlsym(handle, name)
-			if err != nil {
-				secErr = fmt.Errorf("darwin: Dlsym %s: %w", name, err)
-				return 0
-			}
-			return derefUint64(sym)
-		}
-
 		kCFAllocatorDefault = loadPtr(cfHandle, "kCFAllocatorDefault")
 		kCFBooleanTrue = loadPtr(cfHandle, "kCFBooleanTrue")
 		kCFBooleanFalse = loadPtr(cfHandle, "kCFBooleanFalse")
@@ -167,10 +159,6 @@ func loadSecurity() {
 		kSecMatchLimitOne = loadPtr(secHandle, "kSecMatchLimitOne")
 		kSecValueRef = loadPtr(secHandle, "kSecValueRef")
 
-		// Integer flag constants
-		kSecAccessControlBiometryAny = loadFlags(secHandle, "kSecAccessControlBiometryAny")
-		kSecAccessControlBiometryCurrentSet = loadFlags(secHandle, "kSecAccessControlBiometryCurrentSet")
-		kSecAccessControlPrivateKeyUsage = loadFlags(secHandle, "kSecAccessControlPrivateKeyUsage")
 	})
 }
 

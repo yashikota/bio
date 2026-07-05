@@ -15,13 +15,6 @@ TEXT ·derefUintptr(SB),NOSPLIT,$0-16
 	MOVQ	AX, ret+8(FP)
 	RET
 
-// func derefUint64(addr uintptr) uint64
-TEXT ·derefUint64(SB),NOSPLIT,$0-16
-	MOVQ	addr+0(FP), AX
-	MOVQ	(AX), AX
-	MOVQ	AX, ret+8(FP)
-	RET
-
 // func copyFromC(src uintptr, dst unsafe.Pointer, n int)
 // Copies n bytes from C address src to Go address dst.
 TEXT ·copyFromC(SB),NOSPLIT,$0-24
