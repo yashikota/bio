@@ -3,6 +3,7 @@
 package darwin
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/ebitengine/purego"
@@ -32,6 +33,10 @@ func loadLA() {
 			return
 		}
 		classLAContext = objc.GetClass("LAContext")
+		if classLAContext == 0 {
+			laErr = fmt.Errorf("darwin: LAContext class not found")
+			return
+		}
 		selAlloc = objc.RegisterName("alloc")
 		selInit = objc.RegisterName("init")
 		selCanEvaluatePolicy = objc.RegisterName("canEvaluatePolicy:error:")

@@ -30,7 +30,7 @@ func (a *darwinAuthenticator) Available(_ context.Context) (BiometryInfo, error)
 	return BiometryInfo{
 		Available:    canEval,
 		BiometryType: mapBiometryType(biometryType),
-		Enrolled:     canEval,
+		Enrolled:     biometryType != darwin.LABiometryTypeNone,
 	}, nil
 }
 

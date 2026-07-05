@@ -23,7 +23,7 @@ const (
 	LAErrorUserFallback         = -3
 	LAErrorSystemCancel         = -4
 	LAErrorPasscodeNotSet       = -5
-	LAErrorBiometryNotAvailable = -6 // was LAErrorAppCancel in older SDK
+	LAErrorBiometryNotAvailable = -6 // was LAErrorTouchIDNotAvailable before macOS 10.13/iOS 11
 	LAErrorBiometryNotEnrolled  = -7
 	LAErrorBiometryLockout      = -8
 	LAErrorAppCancel            = -9
