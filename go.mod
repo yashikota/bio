@@ -1,3 +1,5 @@
 module github.com/yashikota/bio
 
 go 1.26.4
+
+require github.com/ebitengine/purego v0.10.1 // indirect
