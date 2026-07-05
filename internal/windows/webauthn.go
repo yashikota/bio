@@ -202,7 +202,7 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 	case <-ctx.Done():
 		cancelOperation(&cancelID)
 		<-ch // wait for goroutine to finish
-		return nil, context.DeadlineExceeded
+		return nil, ctx.Err()
 	}
 }
 
@@ -329,7 +329,7 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 	case <-ctx.Done():
 		cancelOperation(&cancelID)
 		<-ch
-		return nil, context.DeadlineExceeded
+		return nil, ctx.Err()
 	}
 }
 
