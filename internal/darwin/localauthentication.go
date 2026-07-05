@@ -19,6 +19,7 @@ var (
 	selCanEvaluatePolicy objc.SEL
 	selBiometryType      objc.SEL
 	selRelease           objc.SEL
+	selCode              objc.SEL
 )
 
 func loadLA() {
@@ -36,6 +37,7 @@ func loadLA() {
 		selCanEvaluatePolicy = objc.RegisterName("canEvaluatePolicy:error:")
 		selBiometryType = objc.RegisterName("biometryType")
 		selRelease = objc.RegisterName("release")
+		selCode = objc.RegisterName("code")
 	})
 }
 
@@ -51,7 +53,11 @@ func CheckAvailability(policy int64) (canEval bool, biometryType int64, err erro
 
 	var nsErrPtr uintptr
 	canEval = objc.Send[bool](ctx, selCanEvaluatePolicy, policy, &nsErrPtr)
-
 	biometryType = objc.Send[int64](ctx, selBiometryType)
+
+	if !canEval && nsErrPtr != 0 {
+		code := objc.Send[int64](objc.ID(nsErrPtr), selCode)
+		return false, biometryType, NewLAError("CheckAvailability", code)
+	}
 	return canEval, biometryType, nil
 }
