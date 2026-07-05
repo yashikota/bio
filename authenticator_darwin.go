@@ -75,8 +75,65 @@ func mapBiometryType(t int64) BiometryType {
 	}
 }
 
-func (a *darwinAuthenticator) MakeCredential(_ context.Context, _ MakeCredentialOptions) (*Credential, error) {
-	return nil, errors.New("bio: MakeCredential not yet implemented on darwin")
+func (a *darwinAuthenticator) MakeCredential(_ context.Context, opts MakeCredentialOptions) (*Credential, error) {
+	if len(opts.Challenge) == 0 {
+		return nil, ErrInvalidParameter
+	}
+	if opts.RP.ID == "" {
+		return nil, ErrInvalidParameter
+	}
+
+	// Build clientDataJSON
+	origin := rpIDOrigin(opts.RP.ID)
+	clientDataJSON, err := buildClientDataJSON("webauthn.create", origin, opts.Challenge)
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate credential ID
+	credID, err := darwin.GenerateCredentialID()
+	if err != nil {
+		return nil, err
+	}
+
+	// Build Keychain application tag
+	tag := darwin.KeychainTag(opts.RP.ID, credID)
+
+	// Create key in Secure Enclave (biometric prompt shown by OS when key is used)
+	label := opts.RP.Name + "/" + opts.User.Name
+	privKey, err := darwin.CreateSecureEnclaveKey(label, tag)
+	if err != nil {
+		return nil, err
+	}
+	defer darwin.ReleaseKey(privKey)
+
+	// Export COSE public key
+	coseKey, err := darwin.ExportPublicKeyCOSE(privKey)
+	if err != nil {
+		_ = darwin.DeleteCredential(opts.RP.ID, credID)
+		return nil, err
+	}
+
+	// Build authenticator data (FIDO2 §6.1)
+	var aaguid [16]byte // zero AAGUID for self-attestation
+	flags := byte(darwin.FlagUP | darwin.FlagUV | darwin.FlagAT)
+	authData := darwin.BuildAuthenticatorData(opts.RP.ID, flags, 0, aaguid, credID, coseKey)
+
+	// Build attestation object — "none" attestation, CBOR encoded
+	attObj := darwin.EncodeMap(
+		darwin.EncodeText("fmt"), darwin.EncodeText("none"),
+		darwin.EncodeText("attStmt"), darwin.EncodeMap(),
+		darwin.EncodeText("authData"), darwin.EncodeBytes(authData),
+	)
+
+	return &Credential{
+		ID:                credID,
+		PublicKey:         coseKey,
+		AttestationObject: attObj,
+		ClientDataJSON:    clientDataJSON,
+		AuthenticatorData: authData,
+		Transport:         []string{"internal"},
+	}, nil
 }
 
 func (a *darwinAuthenticator) GetAssertion(_ context.Context, _ GetAssertionOptions) (*Assertion, error) {
