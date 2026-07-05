@@ -4,7 +4,6 @@ package darwin
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"sync"
 	"unsafe"
@@ -409,11 +408,4 @@ func CredentialIDFromTag(tag []byte, rpID string) []byte {
 		return nil
 	}
 	return tag[len(prefix):]
-}
-
-// u32Bytes encodes n as big-endian uint32.
-func u32Bytes(n uint32) []byte {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, n)
-	return b
 }
