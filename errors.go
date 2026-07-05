@@ -25,7 +25,10 @@ type PlatformError struct {
 }
 
 func (e *PlatformError) Error() string {
-	return fmt.Sprintf("bio: %s [%s code=%d]: %v", e.Op, e.Platform, e.Code, e.Err)
+	if e.Err != nil {
+		return fmt.Sprintf("bio: %s [%s code=%d]: %v", e.Op, e.Platform, e.Code, e.Err)
+	}
+	return fmt.Sprintf("bio: %s [%s code=%d]", e.Op, e.Platform, e.Code)
 }
 
 func (e *PlatformError) Unwrap() error { return e.Err }

@@ -3,13 +3,11 @@ package bio
 type config struct {
 	hwnd            uintptr
 	localizedReason string
-	attestation     AttestationConveyance
 }
 
 func defaultConfig() *config {
 	return &config{
 		localizedReason: "Authenticate using biometrics",
-		attestation:     AttestationNone,
 	}
 }
 
