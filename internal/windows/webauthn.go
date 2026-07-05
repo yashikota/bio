@@ -190,6 +190,7 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 		runtime.KeepAlive(&coseCredParams)
 		runtime.KeepAlive(coseParams)
 		runtime.KeepAlive(&clientData)
+		runtime.KeepAlive(&cancelID)
 		runtime.KeepAlive(&opts)
 		if len(params.ExcludeIDs) > 0 {
 			runtime.KeepAlive(opts.ExcludeCredentialList)
@@ -324,6 +325,7 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 		// Prevent GC from collecting Go-allocated structs before the blocking DLL call returns.
 		runtime.KeepAlive(rpID)
 		runtime.KeepAlive(&clientData)
+		runtime.KeepAlive(&cancelID)
 		runtime.KeepAlive(&opts)
 		if len(params.AllowIDs) > 0 {
 			runtime.KeepAlive(opts.AllowCredentialList)

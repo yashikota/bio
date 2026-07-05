@@ -102,9 +102,9 @@ type AuthGetAssertionOptions struct {
 	U2FAppID       *uint16 // PCWSTR
 	IsU2FAppIDUsed *int32  // BOOL*
 	// v3:
-	AllowCredentialList *CredentialList
-	// v4:
 	CancellationID *GUID
+	// v4:
+	AllowCredentialList *CredentialList
 }
 
 // CredentialAttestation corresponds to WEBAUTHN_CREDENTIAL_ATTESTATION.
