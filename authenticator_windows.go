@@ -44,27 +44,27 @@ func mapWinError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var we *winwebauthn.WinError
-	if errors.As(err, &we) {
-		switch we.Kind {
-		case winwebauthn.WinErrUserCanceled:
-			return ErrUserCanceled
-		case winwebauthn.WinErrTimeout:
-			return ErrTimeout
-		case winwebauthn.WinErrInvalidParam:
-			return ErrInvalidParameter
-		case winwebauthn.WinErrNoCredentials:
-			return ErrNoCredentials
-		default:
-			return &PlatformError{
-				Op:       we.Op,
-				Platform: "windows",
-				Code:     int64(we.HR),
-				Err:      fmt.Errorf("HRESULT 0x%08X", we.HR),
-			}
+	we, ok := errors.AsType[*winwebauthn.WinError](err)
+	if !ok {
+		return err
+	}
+	switch we.Kind {
+	case winwebauthn.WinErrUserCanceled:
+		return ErrUserCanceled
+	case winwebauthn.WinErrTimeout:
+		return ErrTimeout
+	case winwebauthn.WinErrInvalidParam:
+		return ErrInvalidParameter
+	case winwebauthn.WinErrNoCredentials:
+		return ErrNoCredentials
+	default:
+		return &PlatformError{
+			Op:       we.Op,
+			Platform: "windows",
+			Code:     int64(we.HR),
+			Err:      fmt.Errorf("HRESULT 0x%08X", we.HR),
 		}
 	}
-	return err
 }
 
 func uvRequirement(uv UserVerification) uint32 {

@@ -21,7 +21,6 @@ var (
 	procFreeAssertion                                 = modWebAuthn.NewProc("WebAuthNFreeAssertion")
 	procGetCancellationID                             = modWebAuthn.NewProc("WebAuthNGetCancellationId")
 	procCancelCurrentOperation                        = modWebAuthn.NewProc("WebAuthNCancelCurrentOperation")
-	procGetErrorName                                  = modWebAuthn.NewProc("WebAuthNGetErrorName")
 )
 
 // APIVersionNumber returns the WebAuthn API version supported by this OS.
