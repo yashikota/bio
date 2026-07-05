@@ -294,6 +294,10 @@ func CreateSecureEnclaveKey(label string, tag []byte) (secKeyRef, error) {
 	return key, nil
 }
 
+// SecKeyRefValue is an opaque handle to a SecKey object.
+// Callers must call ReleaseKey when done.
+type SecKeyRefValue = secKeyRef
+
 // ReleaseKey releases a SecKey CF object.
 func ReleaseKey(key secKeyRef) {
 	if key != 0 {

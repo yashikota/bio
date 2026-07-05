@@ -136,6 +136,67 @@ func (a *darwinAuthenticator) MakeCredential(_ context.Context, opts MakeCredent
 	}, nil
 }
 
-func (a *darwinAuthenticator) GetAssertion(_ context.Context, _ GetAssertionOptions) (*Assertion, error) {
-	return nil, errors.New("bio: GetAssertion not yet implemented on darwin")
+func (a *darwinAuthenticator) GetAssertion(_ context.Context, opts GetAssertionOptions) (*Assertion, error) {
+	if len(opts.Challenge) == 0 {
+		return nil, ErrInvalidParameter
+	}
+	if opts.RPID == "" {
+		return nil, ErrInvalidParameter
+	}
+
+	// Build clientDataJSON
+	origin := rpIDOrigin(opts.RPID)
+	clientDataJSON, err := buildClientDataJSON("webauthn.get", origin, opts.Challenge)
+	if err != nil {
+		return nil, err
+	}
+	cdHash := clientDataHash(clientDataJSON)
+
+	// Find the private key. If AllowCredentials is empty, credential scan is not supported.
+	if len(opts.AllowCredentials) == 0 {
+		return nil, ErrNoCredentials
+	}
+
+	var privKey darwin.SecKeyRefValue
+	var usedCredID []byte
+	var lastErr error
+
+	for _, desc := range opts.AllowCredentials {
+		tag := darwin.KeychainTag(opts.RPID, desc.ID)
+		k, err := darwin.LookupPrivateKey(tag)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		privKey = k
+		usedCredID = desc.ID
+		break
+	}
+
+	if usedCredID == nil {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, ErrNoCredentials
+	}
+	defer darwin.ReleaseKey(privKey)
+
+	// Build authenticator data (no attested credential data for assertions)
+	flags := byte(darwin.FlagUP | darwin.FlagUV)
+	authData := darwin.BuildGetAssertionAuthData(opts.RPID, flags, 0)
+
+	// Sign: authData || clientDataHash (FIDO2 spec §6.3.3)
+	dataToSign := append(authData, cdHash...)
+	sig, err := darwin.Sign(privKey, dataToSign)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Assertion{
+		CredentialID:      usedCredID,
+		AuthenticatorData: authData,
+		Signature:         sig,
+		UserHandle:        nil, // not stored in Keychain tag
+		ClientDataJSON:    clientDataJSON,
+	}, nil
 }
