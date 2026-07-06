@@ -64,6 +64,10 @@ type MakeCredentialOptions struct {
 	Attestation        AttestationConveyance
 	UserVerification   UserVerification
 	Timeout            time.Duration
+	// ClientDataJSON, if non-nil, is used as-is instead of building one from
+	// Type/Challenge/Origin. The caller is responsible for its correctness.
+	// The same bytes are returned unchanged in Credential.ClientDataJSON.
+	ClientDataJSON []byte
 }
 
 // GetAssertionOptions configures an assertion request.
@@ -73,6 +77,10 @@ type GetAssertionOptions struct {
 	AllowCredentials []CredentialDescriptor
 	UserVerification UserVerification
 	Timeout          time.Duration
+	// ClientDataJSON, if non-nil, is used as-is instead of building one from
+	// Type/Challenge/Origin. The caller is responsible for its correctness.
+	// The same bytes are returned unchanged in Assertion.ClientDataJSON.
+	ClientDataJSON []byte
 }
 
 // Credential is the result of a successful MakeCredential operation.

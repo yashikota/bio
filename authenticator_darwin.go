@@ -86,11 +86,17 @@ func (a *darwinAuthenticator) MakeCredential(ctx context.Context, opts MakeCrede
 		return nil, err
 	}
 
-	// Build clientDataJSON
-	origin := rpIDOrigin(opts.RP.ID)
-	clientDataJSON, err := buildClientDataJSON("webauthn.create", origin, opts.Challenge)
-	if err != nil {
-		return nil, err
+	// Build clientDataJSON (or use caller-provided value)
+	var clientDataJSON []byte
+	if len(opts.ClientDataJSON) > 0 {
+		clientDataJSON = opts.ClientDataJSON
+	} else {
+		origin := rpIDOrigin(opts.RP.ID)
+		var err error
+		clientDataJSON, err = buildClientDataJSON("webauthn.create", origin, opts.Challenge)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Generate credential ID
@@ -156,11 +162,17 @@ func (a *darwinAuthenticator) GetAssertion(ctx context.Context, opts GetAssertio
 		return nil, ErrInvalidParameter
 	}
 
-	// Build clientDataJSON
-	origin := rpIDOrigin(opts.RPID)
-	clientDataJSON, err := buildClientDataJSON("webauthn.get", origin, opts.Challenge)
-	if err != nil {
-		return nil, err
+	// Build clientDataJSON (or use caller-provided value)
+	var clientDataJSON []byte
+	if len(opts.ClientDataJSON) > 0 {
+		clientDataJSON = opts.ClientDataJSON
+	} else {
+		origin := rpIDOrigin(opts.RPID)
+		var err error
+		clientDataJSON, err = buildClientDataJSON("webauthn.get", origin, opts.Challenge)
+		if err != nil {
+			return nil, err
+		}
 	}
 	cdHash := clientDataHash(clientDataJSON)
 
