@@ -97,11 +97,10 @@ func (a *windowsAuthenticator) MakeCredential(ctx context.Context, opts MakeCred
 		return nil, ErrInvalidParameter
 	}
 
-	origin := rpIDOrigin(opts.RP.ID)
-	clientDataJSON, err := buildClientDataJSON("webauthn.create", origin, opts.Challenge)
-	if err != nil {
-		return nil, err
+	if len(opts.ClientDataJSON) == 0 {
+		return nil, ErrInvalidParameter
 	}
+	clientDataJSON := opts.ClientDataJSON
 
 	algs := make([]int32, 0, len(opts.PubKeyCredParams))
 	for _, p := range opts.PubKeyCredParams {
@@ -160,11 +159,10 @@ func (a *windowsAuthenticator) GetAssertion(ctx context.Context, opts GetAsserti
 		return nil, ErrInvalidParameter
 	}
 
-	origin := rpIDOrigin(opts.RPID)
-	clientDataJSON, err := buildClientDataJSON("webauthn.get", origin, opts.Challenge)
-	if err != nil {
-		return nil, err
+	if len(opts.ClientDataJSON) == 0 {
+		return nil, ErrInvalidParameter
 	}
+	clientDataJSON := opts.ClientDataJSON
 
 	allowIDs := make([][]byte, 0, len(opts.AllowCredentials))
 	for _, c := range opts.AllowCredentials {

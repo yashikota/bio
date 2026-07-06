@@ -64,6 +64,11 @@ type MakeCredentialOptions struct {
 	Attestation        AttestationConveyance
 	UserVerification   UserVerification
 	Timeout            time.Duration
+	// ClientDataJSON is the serialized client data (RFC 8785 / WebAuthn §5.8.1).
+	// The caller is responsible for constructing it with the correct type, challenge,
+	// and origin. Its SHA-256 hash is used as the clientDataHash during signing.
+	// The same bytes are returned unchanged in Credential.ClientDataJSON.
+	ClientDataJSON []byte
 }
 
 // GetAssertionOptions configures an assertion request.
@@ -73,6 +78,11 @@ type GetAssertionOptions struct {
 	AllowCredentials []CredentialDescriptor
 	UserVerification UserVerification
 	Timeout          time.Duration
+	// ClientDataJSON is the serialized client data (RFC 8785 / WebAuthn §5.8.1).
+	// The caller is responsible for constructing it with the correct type, challenge,
+	// and origin. Its SHA-256 hash is used as the clientDataHash during signing.
+	// The same bytes are returned unchanged in Assertion.ClientDataJSON.
+	ClientDataJSON []byte
 }
 
 // Credential is the result of a successful MakeCredential operation.
