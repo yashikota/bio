@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,19 @@ import (
 
 	"github.com/yashikota/bio"
 )
+
+func buildClientDataJSON(typ, origin string, challenge []byte) ([]byte, error) {
+	return json.Marshal(struct {
+		Type        string `json:"type"`
+		Challenge   string `json:"challenge"`
+		Origin      string `json:"origin"`
+		CrossOrigin bool   `json:"crossOrigin"`
+	}{
+		Type:      typ,
+		Challenge: base64.RawURLEncoding.EncodeToString(challenge),
+		Origin:    origin,
+	})
+}
 
 func main() {
 	authn, err := bio.New()
@@ -31,6 +45,12 @@ func main() {
 		log.Fatalf("rand: %v", err)
 	}
 
+	// Build clientDataJSON (in production, the browser/client constructs this).
+	clientDataJSON, err := buildClientDataJSON("webauthn.create", "https://example.com", challenge)
+	if err != nil {
+		log.Fatalf("clientDataJSON: %v", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -44,7 +64,8 @@ func main() {
 			Name:        "user@example.com",
 			DisplayName: "Example User",
 		},
-		Challenge: challenge,
+		Challenge:      challenge,
+		ClientDataJSON: clientDataJSON,
 		PubKeyCredParams: []bio.CredentialParameter{
 			{Type: "public-key", Algorithm: bio.AlgES256},
 		},
