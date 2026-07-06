@@ -1,25 +1,26 @@
 # bio
 
-A CGo-free FIDO2/WebAuthn biometric authentication library for Go, supporting macOS (Touch ID / Face ID / Optic ID) and Windows (Windows Hello).
+A CGo-free FIDO2/WebAuthn biometric authentication library for Go, supporting macOS (Touch ID / Face ID), Windows (Windows Hello), and Linux (fprintd + TPM2).
 
 ## Features
 
-- **No CGo** — uses [purego](https://github.com/ebitengine/purego) on macOS and `golang.org/x/sys` on Windows
+- **No CGo** — uses [purego](https://github.com/ebitengine/purego) on macOS, `golang.org/x/sys` on Windows, and D-Bus + TPM2 on Linux
 - **FIDO2/WebAuthn compatible** — produces standard `AttestationObject`, `AuthenticatorData`, and `Signature` outputs
 - **Context-aware** — all blocking calls respect `context.Context` cancellation and timeouts
-- **Cross-platform** — single API across macOS and Windows; returns `ErrUnsupportedPlatform` on other OSes
+- **Cross-platform** — single API across macOS, Windows, and Linux; returns `ErrUnsupportedPlatform` on other OSes
 
 ## Platform support
 
 | Platform | Authenticator | Biometry |
 |---|---|---|
-| macOS | Secure Enclave / Keychain | Touch ID, Face ID, Optic ID |
+| macOS | Secure Enclave / Keychain | Touch ID, Face ID |
 | Windows | Windows Hello | PIN, fingerprint, face |
+| Linux | fprintd + TPM2 | Fingerprint |
 
 ## Requirements
 
 - Go 1.22+
-- macOS 12+ or Windows 10 (build 17763) / Windows 11
+- macOS 12+, Windows 10 (build 17763) / Windows 11, or Linux with fprintd and TPM2
 
 ## Installation
 
@@ -91,12 +92,13 @@ Send `assertion.AuthenticatorData`, `assertion.Signature`, and `assertion.Client
 
 ### `bio.New(opts ...Option) (Authenticator, error)`
 
-Returns a platform-specific `Authenticator`. Options:
+Returns a platform-specific `Authenticator`. Platform-specific options:
 
-| Option | Description |
-|---|---|
-| `WithLocalizedReason(string)` | Prompt text shown in the biometric dialog (macOS) |
-| `WithHWND(uintptr)` | Parent window handle (Windows) |
+| Option | Platform | Description |
+|---|---|---|
+| `WithLocalizedReason(string)` | macOS | Prompt text shown in the biometric dialog |
+| `WithHWND(uintptr)` | Windows | Parent window handle |
+| `WithVerifyTimeout(time.Duration)` | Linux | Timeout for fingerprint scan (default 30s) |
 
 ### `Authenticator` interface
 
@@ -113,7 +115,7 @@ type Authenticator interface {
 ```go
 type BiometryInfo struct {
     Available    bool
-    BiometryType BiometryType  // BiometryTouchID, BiometryFaceID, BiometryOpticID, BiometryHello
+    BiometryType BiometryType  // BiometryTouchID, BiometryFaceID, BiometryOpticID, BiometryHello, BiometryFingerprint
     Enrolled     bool
 }
 
@@ -140,14 +142,14 @@ type Assertion struct {
 | Constant | Value | Algorithm |
 |---|---|---|
 | `AlgES256` | -7 | ECDSA with P-256 and SHA-256 |
-| `AlgRS256` | -257 | RSASSA-PKCS1-v1.5 with SHA-256 |
+| `AlgRS256` | -257 | RSASSA-PKCS1-v1_5 with SHA-256 |
 | `AlgEdDSA` | -8 | EdDSA |
 
 ## Error handling
 
 ```go
 var (
-    ErrUnsupportedPlatform // OS is not macOS or Windows
+    ErrUnsupportedPlatform // OS is not supported
     ErrNotAvailable        // biometric hardware not present
     ErrNotEnrolled         // no biometrics enrolled
     ErrUserCanceled        // user dismissed the prompt

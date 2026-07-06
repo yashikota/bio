@@ -8,3 +8,11 @@ tasks:
   fmt:
     cmds:
       - golangci-lint fmt ./...
+
+  test:
+    cmds:
+      - go test -v -shuffle=on -race ./...
+
+  test-integration:
+    cmds:
+      - go test -v -tags 'linux integration' ./internal/linux/ -run TestTPM

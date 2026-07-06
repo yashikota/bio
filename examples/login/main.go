@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,17 +16,17 @@ import (
 
 func main() {
 	// Load the credential ID saved by the register example.
-	raw, err := os.ReadFile("/tmp/bio_cred_id.txt")
+	credFile := filepath.Join(os.TempDir(), "bio_cred_id.txt")
+	raw, err := os.ReadFile(credFile)
 	if err != nil {
-		log.Fatalf("Could not read credential ID from /tmp/bio_cred_id.txt: %v\n"+
-			"Run `go run ./examples/register` first.", err)
+		log.Fatalf("Could not read credential ID from %s: %v\nRun `go run ./examples/register` first.", credFile, err)
 	}
 	credID, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(raw)))
 	if err != nil {
 		log.Fatalf("Decode credential ID: %v", err)
 	}
 
-	authn, err := bio.New(bio.WithLocalizedReason("Log in with biometrics"))
+	authn, err := bio.New()
 	if err != nil {
 		log.Fatalf("bio.New: %v", err)
 	}
