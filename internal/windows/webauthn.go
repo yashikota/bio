@@ -54,15 +54,15 @@ func IsAvailable() (bool, error) {
 
 // MakeCredentialParams holds Go-typed parameters for MakeCredential.
 type MakeCredentialParams struct {
-	HWND            uintptr
-	RPID            string
-	RPName          string
-	UserID          []byte
-	UserName        string
-	UserDisplayName string
-	Challenge       []byte
-	ClientDataJSON  []byte
-	Algorithms      []int32 // COSE algorithm IDs
+	HWND             uintptr
+	RPID             string
+	RPName           string
+	UserID           []byte
+	UserName         string
+	UserDisplayName  string
+	Challenge        []byte
+	ClientDataJSON   []byte
+	Algorithms       []int32 // COSE algorithm IDs
 	UserVerification uint32
 	AttestationPref  uint32
 	TimeoutMS        uint32

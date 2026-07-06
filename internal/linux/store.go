@@ -19,7 +19,7 @@ type CredentialRecord struct {
 	TPMPublic    []byte    `json:"tpm_public"`
 	TPMPrivate   []byte    `json:"tpm_private"`
 	UserHandle   []byte    `json:"user_handle"`
-	SignCount     uint32    `json:"sign_count"`
+	SignCount    uint32    `json:"sign_count"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 

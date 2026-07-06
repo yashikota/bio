@@ -22,11 +22,11 @@ func (e *WinError) Error() string {
 type WinErrorKind int
 
 const (
-	WinErrPlatform        WinErrorKind = 0
-	WinErrUserCanceled    WinErrorKind = 1
-	WinErrTimeout         WinErrorKind = 2
-	WinErrInvalidParam    WinErrorKind = 3
-	WinErrNoCredentials   WinErrorKind = 4
+	WinErrPlatform      WinErrorKind = 0
+	WinErrUserCanceled  WinErrorKind = 1
+	WinErrTimeout       WinErrorKind = 2
+	WinErrInvalidParam  WinErrorKind = 3
+	WinErrNoCredentials WinErrorKind = 4
 )
 
 func (k WinErrorKind) String() string {

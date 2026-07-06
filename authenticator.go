@@ -13,10 +13,10 @@ type Authenticator interface {
 type BiometryType int
 
 const (
-	BiometryNone    BiometryType = 0
-	BiometryTouchID BiometryType = 1
-	BiometryFaceID  BiometryType = 2
-	BiometryOpticID BiometryType = 4
+	BiometryNone        BiometryType = 0
+	BiometryTouchID     BiometryType = 1
+	BiometryFaceID      BiometryType = 2
+	BiometryOpticID     BiometryType = 4
 	BiometryHello       BiometryType = 5 // Windows Hello
 	BiometryFingerprint BiometryType = 6 // Linux fprintd
 )

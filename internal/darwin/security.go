@@ -23,8 +23,8 @@ type secKeyRef cfTypeRef
 type secAccessControlRef cfTypeRef
 
 var (
-	secOnce sync.Once
-	secErr  error
+	secOnce   sync.Once
+	secErr    error
 	cfHandle  uintptr
 	secHandle uintptr
 
@@ -49,24 +49,24 @@ var (
 	fnSecItemAdd                       func(attrs cfDictionaryRef, result *uintptr) int32
 
 	// CFError inspection
-	fnCFErrorGetCode        func(err cfErrorRef) int64
+	fnCFErrorGetCode         func(err cfErrorRef) int64
 	fnCFErrorCopyDescription func(err cfErrorRef) cfStringRef
-	fnCFStringGetCString    func(s cfStringRef, buf uintptr, bufSize int, encoding uint32) bool
+	fnCFStringGetCString     func(s cfStringRef, buf uintptr, bufSize int, encoding uint32) bool
 
 	// CF constants loaded via Dlsym
-	kCFAllocatorDefault                            uintptr
-	kSecAttrKeyTypeECSECPrimeRandom                uintptr
-	kSecAttrTokenIDSecureEnclave                   uintptr
-	kSecAttrKeyType                                uintptr
-	kSecAttrKeySizeInBits                          uintptr
-	kSecAttrTokenID                                uintptr
-	kSecAttrAccessControl                          uintptr
-	kSecAttrLabel                                  uintptr
-	kSecAttrApplicationTag                         uintptr
-	kSecAttrIsPermanent                            uintptr
-	kSecUseDataProtectionKeychain                  uintptr
-	kCFBooleanTrue                                 uintptr
-	kCFBooleanFalse                                uintptr
+	kCFAllocatorDefault                             uintptr
+	kSecAttrKeyTypeECSECPrimeRandom                 uintptr
+	kSecAttrTokenIDSecureEnclave                    uintptr
+	kSecAttrKeyType                                 uintptr
+	kSecAttrKeySizeInBits                           uintptr
+	kSecAttrTokenID                                 uintptr
+	kSecAttrAccessControl                           uintptr
+	kSecAttrLabel                                   uintptr
+	kSecAttrApplicationTag                          uintptr
+	kSecAttrIsPermanent                             uintptr
+	kSecUseDataProtectionKeychain                   uintptr
+	kCFBooleanTrue                                  uintptr
+	kCFBooleanFalse                                 uintptr
 	kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly uintptr
 	kSecKeyAlgorithmECDSASignatureMessageX962SHA256 uintptr
 	kSecPrivateKeyAttrs                             uintptr
@@ -90,8 +90,8 @@ const (
 
 	// SecAccessControlCreateFlags enum values (CF_OPTIONS, not exported as dylib symbols).
 	// Source: Security/SecAccessControl.h
-	kSecAccessControlBiometryAny        uint64 = 1 << 1  // kSecAccessControlTouchIDAny renamed
-	kSecAccessControlBiometryCurrentSet uint64 = 1 << 3  // kSecAccessControlTouchIDCurrentSet renamed
+	kSecAccessControlBiometryAny        uint64 = 1 << 1 // kSecAccessControlTouchIDAny renamed
+	kSecAccessControlBiometryCurrentSet uint64 = 1 << 3 // kSecAccessControlTouchIDCurrentSet renamed
 	kSecAccessControlPrivateKeyUsage    uint64 = 1 << 30
 )
 

@@ -10,18 +10,17 @@ import (
 	"github.com/ebitengine/purego/objc"
 )
 
-
 var (
-	laOnce  sync.Once
-	laErr   error
+	laOnce sync.Once
+	laErr  error
 
-	classLAContext            objc.Class
-	selAlloc                  objc.SEL
-	selInit                   objc.SEL
-	selCanEvaluatePolicy      objc.SEL
-	selBiometryType           objc.SEL
-	selRelease                objc.SEL
-	selCode                   objc.SEL
+	classLAContext             objc.Class
+	selAlloc                   objc.SEL
+	selInit                    objc.SEL
+	selCanEvaluatePolicy       objc.SEL
+	selBiometryType            objc.SEL
+	selRelease                 objc.SEL
+	selCode                    objc.SEL
 	selEvaluatePolicyWithReply objc.SEL
 )
 
