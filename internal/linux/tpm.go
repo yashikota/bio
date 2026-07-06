@@ -7,7 +7,6 @@ import (
 	"encoding/asn1"
 	"fmt"
 	"math/big"
-	"os"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
@@ -15,6 +14,23 @@ import (
 )
 
 var tpmPaths = []string{"/dev/tpmrm0", "/dev/tpm0"}
+
+// OpenTPMFunc is the function used to open a TPM transport. It can be replaced in tests.
+var OpenTPMFunc = defaultOpenTPM
+
+func defaultOpenTPM() (transport.TPMCloser, error) {
+	return openTPMFromPaths(tpmPaths)
+}
+
+func openTPMFromPaths(paths []string) (transport.TPMCloser, error) {
+	for _, p := range paths {
+		t, err := linuxtpm.Open(p)
+		if err == nil {
+			return t, nil
+		}
+	}
+	return nil, fmt.Errorf("no TPM device found (tried %v)", paths)
+}
 
 // eccKeyTemplate is the TPMT_PUBLIC template for a non-restricted ECDSA P-256 signing key.
 var eccKeyTemplate = tpm2.TPMTPublic{
@@ -53,23 +69,17 @@ var eccKeyTemplate = tpm2.TPMTPublic{
 }
 
 func openTPM() (transport.TPMCloser, error) {
-	for _, p := range tpmPaths {
-		t, err := linuxtpm.Open(p)
-		if err == nil {
-			return t, nil
-		}
-	}
-	return nil, fmt.Errorf("no TPM device found (tried %v)", tpmPaths)
+	return OpenTPMFunc()
 }
 
 // IsTPMAvailable reports whether a TPM2 device is accessible.
 func IsTPMAvailable() bool {
-	for _, p := range tpmPaths {
-		if fi, err := os.Stat(p); err == nil && fi.Mode()&os.ModeDevice != 0 {
-			return true
-		}
+	t, err := OpenTPMFunc()
+	if err != nil {
+		return false
 	}
-	return false
+	t.Close()
+	return true
 }
 
 // createSRK creates (or re-creates) the ECC SRK under the owner hierarchy.
