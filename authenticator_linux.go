@@ -30,7 +30,7 @@ func (a *linuxAuthenticator) Available(_ context.Context) (BiometryInfo, error) 
 	if err != nil {
 		return BiometryInfo{Available: false, BiometryType: BiometryFingerprint, Enrolled: false}, nil
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	enrolled, _ := client.HasEnrolledFingerprints()
 	available := tpmOK && enrolled
@@ -57,7 +57,7 @@ func (a *linuxAuthenticator) MakeCredential(ctx context.Context, opts MakeCreden
 	if err != nil {
 		return nil, mapLinuxError("MakeCredential", err)
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	verifyCtx := ctx
 	if a.cfg.verifyTimeout > 0 {
@@ -156,7 +156,7 @@ func (a *linuxAuthenticator) GetAssertion(ctx context.Context, opts GetAssertion
 	if err != nil {
 		return nil, mapLinuxError("GetAssertion", err)
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	verifyCtx := ctx
 	if a.cfg.verifyTimeout > 0 {

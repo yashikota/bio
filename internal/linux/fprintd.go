@@ -4,7 +4,6 @@ package linux
 
 import (
 	"context"
-	"fmt"
 	"os/user"
 
 	"github.com/godbus/dbus/v5"
@@ -33,7 +32,7 @@ func NewFprintdClient() (*FprintdClient, error) {
 	mgr := conn.Object(fprintService, dbus.ObjectPath(fprintManager))
 	var devicePath dbus.ObjectPath
 	if err := mgr.Call(fprintManagerIF+".GetDefaultDevice", 0).Store(&devicePath); err != nil {
-		conn.Close()
+		conn.Close() //nolint:errcheck
 		return nil, &FprintdError{Op: "GetDefaultDevice", Status: err.Error()}
 	}
 
@@ -119,7 +118,7 @@ func (c *FprintdClient) Verify(ctx context.Context) error {
 				continue
 			case "verify-no-match":
 				if done {
-					return &FprintdError{Op: "Verify", Status: fmt.Sprintf("verify-no-match")}
+					return &FprintdError{Op: "Verify", Status: "verify-no-match"}
 				}
 				continue
 			case "verify-disconnected":

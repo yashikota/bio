@@ -78,7 +78,7 @@ func IsTPMAvailable() bool {
 	if err != nil {
 		return false
 	}
-	t.Close()
+	t.Close() //nolint:errcheck
 	return true
 }
 
@@ -102,7 +102,7 @@ func CreateKey() (pub []byte, priv []byte, rawPubKey []byte, err error) {
 	if err != nil {
 		return nil, nil, nil, &TPMError{Op: "CreateKey", Err: err}
 	}
-	defer t.Close()
+	defer t.Close() //nolint:errcheck
 
 	srkHandle, srkName, err := createSRK(t)
 	if err != nil {
@@ -154,7 +154,7 @@ func Sign(pubBlob, privBlob, dataToSign []byte) ([]byte, error) {
 	if err != nil {
 		return nil, &TPMError{Op: "Sign", Err: err}
 	}
-	defer t.Close()
+	defer t.Close() //nolint:errcheck
 
 	srkHandle, srkName, err := createSRK(t)
 	if err != nil {
