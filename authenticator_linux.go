@@ -79,17 +79,10 @@ func (a *linuxAuthenticator) MakeCredential(ctx context.Context, opts MakeCreden
 		return nil, mapLinuxError("MakeCredential", err)
 	}
 
-	var clientDataJSON []byte
-	if len(opts.ClientDataJSON) > 0 {
-		clientDataJSON = opts.ClientDataJSON
-	} else {
-		origin := rpIDOrigin(opts.RP.ID)
-		var cdErr error
-		clientDataJSON, cdErr = buildClientDataJSON("webauthn.create", origin, opts.Challenge)
-		if cdErr != nil {
-			return nil, cdErr
-		}
+	if len(opts.ClientDataJSON) == 0 {
+		return nil, ErrInvalidParameter
 	}
+	clientDataJSON := opts.ClientDataJSON
 
 	coseKey := linux.EncodeCOSEES256(rawPubKey)
 
@@ -174,17 +167,10 @@ func (a *linuxAuthenticator) GetAssertion(ctx context.Context, opts GetAssertion
 		return nil, mapLinuxError("GetAssertion", err)
 	}
 
-	var clientDataJSON []byte
-	if len(opts.ClientDataJSON) > 0 {
-		clientDataJSON = opts.ClientDataJSON
-	} else {
-		origin := rpIDOrigin(opts.RPID)
-		var cdErr error
-		clientDataJSON, cdErr = buildClientDataJSON("webauthn.get", origin, opts.Challenge)
-		if cdErr != nil {
-			return nil, cdErr
-		}
+	if len(opts.ClientDataJSON) == 0 {
+		return nil, ErrInvalidParameter
 	}
+	clientDataJSON := opts.ClientDataJSON
 	cdHash := clientDataHash(clientDataJSON)
 
 	signCount, err := store.IncrementSignCount(opts.RPID, rec.CredentialID)
