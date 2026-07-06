@@ -17,7 +17,8 @@ const (
 	BiometryTouchID BiometryType = 1
 	BiometryFaceID  BiometryType = 2
 	BiometryOpticID BiometryType = 4
-	BiometryHello   BiometryType = 5 // Windows Hello
+	BiometryHello       BiometryType = 5 // Windows Hello
+	BiometryFingerprint BiometryType = 6 // Linux fprintd
 )
 
 func (b BiometryType) String() string {
@@ -30,6 +31,8 @@ func (b BiometryType) String() string {
 		return "OpticID"
 	case BiometryHello:
 		return "WindowsHello"
+	case BiometryFingerprint:
+		return "Fingerprint"
 	default:
 		return "None"
 	}
