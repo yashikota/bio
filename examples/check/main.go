@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	authn, err := bio.New(bio.WithLocalizedReason("Check biometric availability"))
+	authn, err := bio.New()
 	if err != nil {
 		log.Fatalf("bio.New: %v", err)
 	}

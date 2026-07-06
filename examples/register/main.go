@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/yashikota/bio"
 )
 
 func main() {
-	authn, err := bio.New(bio.WithLocalizedReason("Register biometric credential"))
+	authn, err := bio.New()
 	if err != nil {
 		log.Fatalf("bio.New: %v", err)
 	}
@@ -62,10 +63,11 @@ func main() {
 	fmt.Printf("Transport      : %v\n", cred.Transport)
 
 	// Save credential ID to a temp file for use by the login example.
-	if err := os.WriteFile("/tmp/bio_cred_id.txt", []byte(credIDBase64), 0600); err != nil {
+	credFile := filepath.Join(os.TempDir(), "bio_cred_id.txt")
+	if err := os.WriteFile(credFile, []byte(credIDBase64), 0600); err != nil {
 		log.Printf("Warning: could not save credential ID: %v", err)
 	} else {
-		fmt.Println("\nCredential ID saved to /tmp/bio_cred_id.txt")
+		fmt.Printf("\nCredential ID saved to %s\n", credFile)
 		fmt.Println("Run `go run ./examples/login` to authenticate.")
 	}
 }
