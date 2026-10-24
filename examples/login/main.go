@@ -1,43 +1,37 @@
+// Command login signs in with the credential created by examples/register
+// and verifies the assertion the way a WebAuthn server would.
 package main
 
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/yashikota/bio"
+	"github.com/yashikota/bio/internal/webauthntest"
 )
 
-func buildClientDataJSON(typ, origin string, challenge []byte) ([]byte, error) {
-	return json.Marshal(struct {
-		Type        string `json:"type"`
-		Challenge   string `json:"challenge"`
-		Origin      string `json:"origin"`
-		CrossOrigin bool   `json:"crossOrigin"`
-	}{
-		Type:      typ,
-		Challenge: base64.RawURLEncoding.EncodeToString(challenge),
-		Origin:    origin,
-	})
+type saved struct {
+	CredentialID []byte `json:"credential_id"`
+	PublicKey    []byte `json:"public_key"`
 }
 
 func main() {
-	// Load the credential ID saved by the register example.
-	credFile := filepath.Join(os.TempDir(), "bio_cred_id.txt")
-	raw, err := os.ReadFile(credFile)
+	rp := webauthntest.Default
+
+	file := filepath.Join(os.TempDir(), "bio_credential.json")
+	b, err := os.ReadFile(file)
 	if err != nil {
-		log.Fatalf("Could not read credential ID from %s: %v\nRun `go run ./examples/register` first.", credFile, err)
+		log.Fatalf("read %s: %v\nRun `go run ./examples/register` first.", file, err)
 	}
-	credID, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(raw)))
-	if err != nil {
-		log.Fatalf("Decode credential ID: %v", err)
+	var s saved
+	if err := json.Unmarshal(b, &s); err != nil {
+		log.Fatalf("parse %s: %v", file, err)
 	}
 
 	authn, err := bio.New()
@@ -45,37 +39,29 @@ func main() {
 		log.Fatalf("bio.New: %v", err)
 	}
 
-	// Generate a random challenge (in production, this comes from the server).
 	challenge := make([]byte, 32)
 	if _, err := rand.Read(challenge); err != nil {
-		log.Fatalf("rand: %v", err)
+		log.Fatal(err)
 	}
-
-	// Build clientDataJSON (in production, the browser/client constructs this).
-	clientDataJSON, err := buildClientDataJSON("webauthn.get", "https://example.com", challenge)
-	if err != nil {
-		log.Fatalf("clientDataJSON: %v", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
-	assertion, err := authn.GetAssertion(ctx, bio.GetAssertionOptions{
-		RPID:           "example.com",
-		Challenge:      challenge,
-		ClientDataJSON: clientDataJSON,
-		AllowCredentials: []bio.CredentialDescriptor{
-			{Type: "public-key", ID: credID},
-		},
+	a, err := authn.GetAssertion(ctx, bio.GetAssertionOptions{
+		RPID:             rp.ID,
+		Challenge:        challenge,
+		ClientDataJSON:   rp.ClientData("webauthn.get", challenge),
+		AllowCredentials: []bio.CredentialDescriptor{{Type: "public-key", ID: s.CredentialID}},
 		UserVerification: bio.UVRequired,
 	})
 	if err != nil {
+		cancel()
 		log.Fatalf("GetAssertion: %v", err)
 	}
+	cancel()
 
-	fmt.Printf("Credential ID  : %s\n", base64.RawURLEncoding.EncodeToString(assertion.CredentialID))
-	fmt.Printf("Auth Data      : %d bytes\n", len(assertion.AuthenticatorData))
-	fmt.Printf("Signature      : %d bytes\n", len(assertion.Signature))
-	fmt.Println("\nAuthentication successful!")
-	fmt.Println("Send AuthenticatorData + Signature + ClientDataJSON to your server for verification.")
+	count, err := rp.VerifyAssertion(challenge, a.CredentialID, a.AuthenticatorData, a.Signature, a.UserHandle, a.ClientDataJSON, s.PublicKey)
+	if err != nil {
+		log.Fatalf("relying party REJECTED the assertion: %v", err)
+	}
+	fmt.Println("Assertion verified by the relying party: OK")
+	fmt.Printf("Sign count: %d, user handle: %x\n", count, a.UserHandle)
 }

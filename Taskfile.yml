@@ -2,17 +2,37 @@ version: '3'
 
 tasks:
   lint:
+    desc: Lint for every supported GOOS (most code is behind build tags)
     cmds:
-      - golangci-lint run ./...
+      - for: [linux, darwin, windows, freebsd]
+        cmd: GOOS={{.ITEM}} golangci-lint run ./...
 
   fmt:
     cmds:
       - golangci-lint fmt ./...
 
-  test:
+  tidy-check:
     cmds:
-      - go test -v -shuffle=on -race ./...
+      - go mod tidy -diff
 
-  test-integration:
+  test:
+    desc: Unit, contract and (when swtpm and dbus-daemon are installed) Linux integration tests
     cmds:
-      - go test -v -tags 'linux integration' ./internal/linux/ -run TestTPM
+      - go test -race -shuffle=on -coverpkg=./... -coverprofile=coverage.out ./...
+
+  cover:
+    deps: [test]
+    cmds:
+      - go tool cover -func=coverage.out | tail -n 1
+
+  fuzz:
+    desc: Run each fuzz target for FUZZTIME (default 30s)
+    vars:
+      FUZZTIME: '{{.FUZZTIME | default "30s"}}'
+    cmds:
+      - for: [FuzzEncodeInt, FuzzItemLength, FuzzParseAuthData, FuzzBuildAuthenticatorData]
+        cmd: go test ./internal/webauthn -run '^$' -fuzz '^{{.ITEM}}$' -fuzztime {{.FUZZTIME}}
+
+  vuln:
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

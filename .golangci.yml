@@ -1,0 +1,41 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    gosec:
+      excludes:
+        - G103 # unsafe is required for the OS bindings
+        - G115 # integer conversions are bounds-checked where it matters
+        - G104 # errcheck already covers unchecked errors, with its default exclusions
+        - G204 # tests start helper binaries (swtpm, dbus-daemon)
+        - G304 # paths come from the user's own data directory
+        - G702 # tests re-execute their own binary
+        - G703 # paths come from the user's own data directory
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # The Windows constants mirror webauthn.h names.
+      - path: internal/windows/
+        linters: [revive]
+        text: "var-naming|don't use ALL_CAPS"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

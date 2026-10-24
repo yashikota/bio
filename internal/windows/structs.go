@@ -2,8 +2,6 @@
 
 package winwebauthn
 
-import "unsafe"
-
 // RPEntityInformation corresponds to WEBAUTHN_RP_ENTITY_INFORMATION.
 type RPEntityInformation struct {
 	Version uint32
@@ -151,8 +149,3 @@ type GUID struct {
 	Data3 uint16
 	Data4 [8]byte
 }
-
-// Verify critical struct sizes to catch alignment bugs at init time.
-var _ = [1]struct{}{}
-
-var _ unsafe.Pointer // ensure unsafe is used

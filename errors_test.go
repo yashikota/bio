@@ -1,6 +1,7 @@
 package bio
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -38,23 +39,28 @@ func TestPlatformError_Error(t *testing.T) {
 	})
 }
 
-func TestSentinelErrors(t *testing.T) {
-	sentinels := []error{
-		ErrUnsupportedPlatform,
-		ErrNotAvailable,
-		ErrNotEnrolled,
-		ErrUserCanceled,
-		ErrTimeout,
-		ErrCredentialExcluded,
-		ErrNoCredentials,
-		ErrInvalidParameter,
+func TestSentinelErrorsAreDistinct(t *testing.T) {
+	for i, a := range sentinels {
+		if !strings.HasPrefix(a.Error(), "bio: ") {
+			t.Errorf("%q lacks the bio: prefix", a)
+		}
+		for _, b := range sentinels[i+1:] {
+			if errors.Is(a, b) || errors.Is(b, a) {
+				t.Errorf("%v and %v are not distinct", a, b)
+			}
+		}
 	}
-	for _, err := range sentinels {
-		if err == nil {
-			t.Errorf("sentinel error should not be nil")
-		}
-		if err.Error() == "" {
-			t.Errorf("sentinel error message should not be empty")
-		}
+}
+
+func TestContextError(t *testing.T) {
+	if err := contextError(context.DeadlineExceeded); !errors.Is(err, ErrTimeout) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("deadline: %v", err)
+	}
+	if err := contextError(context.Canceled); !errors.Is(err, ErrUserCanceled) || !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled: %v", err)
+	}
+	other := errors.New("other")
+	if !errors.Is(contextError(other), other) {
+		t.Error("other errors must pass through")
 	}
 }
