@@ -3,235 +3,199 @@
 package bio
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yashikota/bio/internal/linux"
 )
 
-type linuxAuthenticator struct {
-	cfg *config
-}
+// On Linux, user verification is a fingerprint match through fprintd and keys
+// live in the TPM. Note the trust model: fprintd only reports a match, it does
+// not release a secret, so the TPM key itself is not bound to the fingerprint.
+// Any process running as the same user can load the key blob and sign. Use
+// WithPINPrompt for keys whose use the TPM itself enforces.
 
 func newAuthenticator(opts ...Option) (Authenticator, error) {
-	cfg := defaultConfig()
-	for _, o := range opts {
-		o(cfg)
-	}
-	return &linuxAuthenticator{cfg: cfg}, nil
+	cfg := newConfig(opts)
+	return newLinuxAuthenticator(cfg, linux.NewFprintd(), linux.NewTPM(), func() (*linux.CredentialStore, error) {
+		return linux.NewCredentialStore(cfg.namespace)
+	}), nil
 }
 
-func (a *linuxAuthenticator) Available(_ context.Context) (BiometryInfo, error) {
-	tpmOK := linux.IsTPMAvailable()
+func newLinuxAuthenticator(cfg *config, fp *linux.Fprintd, tpm *linux.TPM, store func() (*linux.CredentialStore, error)) *localAuthenticator {
+	return &localAuthenticator{
+		cfg:      cfg,
+		verifier: &fprintdVerifier{fprintd: fp, timeout: cfg.verifyTimeout, pinPrompt: cfg.pinPrompt},
+		keys:     &tpmKeyStore{tpm: tpm, store: store},
+		available: func(context.Context) (BiometryInfo, error) {
+			return linuxAvailable(fp, tpm), nil
+		},
+		mapErr: mapLinuxError,
+	}
+}
 
-	client, err := linux.NewFprintdClient()
+func linuxAvailable(fp *linux.Fprintd, tpm *linux.TPM) BiometryInfo {
+	info := BiometryInfo{BiometryType: BiometryFingerprint}
+	client, err := fp.Open()
 	if err != nil {
-		return BiometryInfo{Available: false, BiometryType: BiometryFingerprint, Enrolled: false}, nil
+		return info
 	}
-	defer client.Close() //nolint:errcheck
-
-	enrolled, _ := client.HasEnrolledFingerprints()
-	available := tpmOK && enrolled
-
-	return BiometryInfo{
-		Available:    available,
-		BiometryType: BiometryFingerprint,
-		Enrolled:     enrolled,
-	}, nil
+	defer client.Close()
+	enrolled, err := client.HasEnrolledFingerprints()
+	info.Enrolled = err == nil && enrolled
+	info.Available = info.Enrolled && tpm.Available()
+	return info
 }
 
-func (a *linuxAuthenticator) MakeCredential(ctx context.Context, opts MakeCredentialOptions) (*Credential, error) {
-	if len(opts.Challenge) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	if opts.RP.ID == "" {
-		return nil, ErrInvalidParameter
-	}
-	if err := ctx.Err(); err != nil {
+type fprintdVerifier struct {
+	fprintd   *linux.Fprintd
+	timeout   time.Duration
+	pinPrompt func(ctx context.Context) (string, error)
+}
+
+// pinVerification carries the PIN entered after a fingerprint match.
+type pinVerification struct{ pin []byte }
+
+func (p *pinVerification) Release() { clear(p.pin) }
+
+func (v *fprintdVerifier) VerifyUser(ctx context.Context, _ string) (verification, error) {
+	client, err := v.fprintd.Open()
+	if err != nil {
 		return nil, err
 	}
-
-	client, err := linux.NewFprintdClient()
-	if err != nil {
-		return nil, mapLinuxError("MakeCredential", err)
-	}
-	defer client.Close() //nolint:errcheck
-
+	defer client.Close()
 	verifyCtx := ctx
-	if a.cfg.verifyTimeout > 0 {
+	if v.timeout > 0 {
 		var cancel context.CancelFunc
-		verifyCtx, cancel = context.WithTimeout(ctx, a.cfg.verifyTimeout)
+		verifyCtx, cancel = context.WithTimeout(ctx, v.timeout)
 		defer cancel()
 	}
 	if err := client.Verify(verifyCtx); err != nil {
-		return nil, mapLinuxError("MakeCredential", err)
+		return nil, err
 	}
-
-	credID := make([]byte, 32)
-	if _, err := rand.Read(credID); err != nil {
-		return nil, fmt.Errorf("bio: generate credential ID: %w", err)
+	if v.pinPrompt == nil {
+		return noVerification{}, nil
 	}
-
-	pub, priv, rawPubKey, err := linux.CreateKey()
+	pin, err := v.pinPrompt(ctx)
 	if err != nil {
-		return nil, mapLinuxError("MakeCredential", err)
+		return nil, err
 	}
-
-	if len(opts.ClientDataJSON) == 0 {
-		return nil, ErrInvalidParameter
+	if pin == "" {
+		return nil, invalidParam("empty PIN")
 	}
-	clientDataJSON := opts.ClientDataJSON
+	return &pinVerification{pin: []byte(pin)}, nil
+}
 
-	coseKey := linux.EncodeCOSEES256(rawPubKey)
+// errPINRequired is returned for a PIN-protected key when no PIN prompt is configured.
+var errPINRequired = errors.New("bio: credential is PIN-protected; configure WithPINPrompt")
 
-	var aaguid [16]byte
-	flags := byte(linux.FlagUP | linux.FlagUV | linux.FlagAT)
-	authData := linux.BuildAuthenticatorData(opts.RP.ID, flags, 0, aaguid, credID, coseKey)
+type tpmKeyStore struct {
+	tpm   *linux.TPM
+	store func() (*linux.CredentialStore, error)
+}
 
-	attObj := linux.EncodeMap(
-		linux.EncodeText("fmt"), linux.EncodeText("none"),
-		linux.EncodeText("attStmt"), linux.EncodeMap(),
-		linux.EncodeText("authData"), linux.EncodeBytes(authData),
-	)
+func pinOf(v verification) []byte {
+	if p, ok := v.(*pinVerification); ok {
+		return p.pin
+	}
+	return nil
+}
 
-	store, err := linux.NewCredentialStore()
+func (s *tpmKeyStore) Create(_ context.Context, v verification, rpID string, credID []byte, user User) ([]byte, error) {
+	store, err := s.store()
 	if err != nil {
-		return nil, mapLinuxError("MakeCredential", err)
+		return nil, err
+	}
+	pin := pinOf(v)
+	pub, priv, raw, err := s.tpm.CreateKey(pin)
+	if err != nil {
+		return nil, err
 	}
 	if err := store.Save(&linux.CredentialRecord{
-		RPID:         opts.RP.ID,
+		RPID:         rpID,
 		CredentialID: credID,
 		TPMPublic:    pub,
 		TPMPrivate:   priv,
-		UserHandle:   opts.User.ID,
+		UserHandle:   bytes.Clone(user.ID),
+		PINProtected: len(pin) > 0,
 	}); err != nil {
-		return nil, mapLinuxError("MakeCredential", err)
-	}
-
-	return &Credential{
-		ID:                credID,
-		PublicKey:         coseKey,
-		AttestationObject: attObj,
-		ClientDataJSON:    clientDataJSON,
-		AuthenticatorData: authData,
-		Transport:         []string{"internal"},
-	}, nil
-}
-
-func (a *linuxAuthenticator) GetAssertion(ctx context.Context, opts GetAssertionOptions) (*Assertion, error) {
-	if len(opts.Challenge) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	if opts.RPID == "" {
-		return nil, ErrInvalidParameter
-	}
-	if len(opts.AllowCredentials) == 0 {
-		return nil, ErrNoCredentials
-	}
-	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	return raw, nil
+}
 
-	store, err := linux.NewCredentialStore()
+func (s *tpmKeyStore) Lookup(rpID string, credID []byte) (*storedKey, error) {
+	store, err := s.store()
 	if err != nil {
-		return nil, mapLinuxError("GetAssertion", err)
+		return nil, err
 	}
-
-	var rec *linux.CredentialRecord
-	for _, desc := range opts.AllowCredentials {
-		r, err := store.Lookup(opts.RPID, desc.ID)
-		if err == nil {
-			rec = r
-			break
-		}
+	rec, err := store.Lookup(rpID, credID)
+	if errors.Is(err, linux.ErrCredentialNotFound) {
+		return nil, errKeyNotFound
 	}
-	if rec == nil {
-		return nil, ErrNoCredentials
-	}
-
-	client, err := linux.NewFprintdClient()
 	if err != nil {
-		return nil, mapLinuxError("GetAssertion", err)
+		return nil, err
 	}
-	defer client.Close() //nolint:errcheck
+	return &storedKey{CredentialID: rec.CredentialID, UserHandle: rec.UserHandle, handle: rec}, nil
+}
 
-	verifyCtx := ctx
-	if a.cfg.verifyTimeout > 0 {
-		var cancel context.CancelFunc
-		verifyCtx, cancel = context.WithTimeout(ctx, a.cfg.verifyTimeout)
-		defer cancel()
-	}
-	if err := client.Verify(verifyCtx); err != nil {
-		return nil, mapLinuxError("GetAssertion", err)
-	}
-
-	if len(opts.ClientDataJSON) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	clientDataJSON := opts.ClientDataJSON
-	cdHash := clientDataHash(clientDataJSON)
-
-	signCount, err := store.IncrementSignCount(opts.RPID, rec.CredentialID)
+func (s *tpmKeyStore) NextSignCount(rpID string, k *storedKey) (uint32, error) {
+	store, err := s.store()
 	if err != nil {
-		return nil, mapLinuxError("GetAssertion", err)
+		return 0, err
 	}
+	return store.IncrementSignCount(rpID, k.CredentialID)
+}
 
-	flags := byte(linux.FlagUP | linux.FlagUV)
-	authData := linux.BuildGetAssertionAuthData(opts.RPID, flags, signCount)
+func (s *tpmKeyStore) Sign(_ context.Context, v verification, k *storedKey, data []byte) ([]byte, error) {
+	rec := k.handle.(*linux.CredentialRecord)
+	pin := pinOf(v)
+	if rec.PINProtected && len(pin) == 0 {
+		return nil, errPINRequired
+	}
+	if !rec.PINProtected {
+		pin = nil
+	}
+	return s.tpm.Sign(rec.TPMPublic, rec.TPMPrivate, pin, data)
+}
 
-	dataToSign := make([]byte, len(authData)+len(cdHash))
-	copy(dataToSign, authData)
-	copy(dataToSign[len(authData):], cdHash)
-
-	sig, err := linux.Sign(rec.TPMPublic, rec.TPMPrivate, dataToSign)
+func (s *tpmKeyStore) Delete(rpID string, credID []byte) error {
+	store, err := s.store()
 	if err != nil {
-		return nil, mapLinuxError("GetAssertion", err)
+		return err
 	}
-
-	return &Assertion{
-		CredentialID:      rec.CredentialID,
-		AuthenticatorData: authData,
-		Signature:         sig,
-		UserHandle:        rec.UserHandle,
-		ClientDataJSON:    clientDataJSON,
-	}, nil
+	if err := store.Delete(rpID, credID); errors.Is(err, linux.ErrCredentialNotFound) {
+		return errKeyNotFound
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 func mapLinuxError(op string, err error) error {
-	if err == nil {
-		return nil
-	}
-
 	var fpErr *linux.FprintdError
 	if errors.As(err, &fpErr) {
 		switch fpErr.Status {
-		case "verify-disconnected", "not-available":
+		case "verify-disconnected", "net.reactivated.Fprint.Error.NoSuchDevice":
 			return ErrNotAvailable
-		case "no-enrolled-prints":
+		case "net.reactivated.Fprint.Error.NoEnrolledPrints":
 			return ErrNotEnrolled
-		case "user-canceled":
-			return ErrUserCanceled
 		}
-		return &PlatformError{Op: op, Platform: "linux", Code: 0,
-			Err: fmt.Errorf("fprintd: %s", fpErr.Status)}
+		if fpErr.Op == "connect" || fpErr.Op == "GetDefaultDevice" {
+			return fmt.Errorf("%w: %w", ErrNotAvailable, err)
+		}
+		return &PlatformError{Op: op, Platform: "linux", Err: err}
 	}
 
 	var tpmErr *linux.TPMError
 	if errors.As(err, &tpmErr) {
-		if tpmErr.Code == 0 && tpmErr.Err != nil {
-			return &PlatformError{Op: op, Platform: "linux", Code: 0, Err: tpmErr.Err}
-		}
 		return &PlatformError{Op: op, Platform: "linux", Code: int64(tpmErr.Code), Err: tpmErr}
 	}
-
-	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrTimeout
+	if errors.Is(err, ErrInvalidParameter) {
+		return err
 	}
-	if errors.Is(err, context.Canceled) {
-		return ErrUserCanceled
-	}
-
-	return &PlatformError{Op: op, Platform: "linux", Code: 0, Err: err}
+	return &PlatformError{Op: op, Platform: "linux", Err: err}
 }

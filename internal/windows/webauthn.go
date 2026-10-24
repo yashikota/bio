@@ -22,6 +22,7 @@ var (
 	procFreeAssertion                                 = modWebAuthn.NewProc("WebAuthNFreeAssertion")
 	procGetCancellationID                             = modWebAuthn.NewProc("WebAuthNGetCancellationId")
 	procCancelCurrentOperation                        = modWebAuthn.NewProc("WebAuthNCancelCurrentOperation")
+	procDeletePlatformCredential                      = modWebAuthn.NewProc("WebAuthNDeletePlatformCredential")
 )
 
 // APIVersionNumber returns the WebAuthn API version supported by this OS.
@@ -52,6 +53,59 @@ func IsAvailable() (bool, error) {
 	return available != 0, nil
 }
 
+// pinner pins Go memory reachable from the structs handed to webauthn.dll.
+// syscall only keeps the direct arguments alive and in place; pointers stored
+// inside those structs need runtime.Pinner to be valid for the C side.
+type pinner struct{ runtime.Pinner }
+
+func (p *pinner) pinUTF16(s *uint16) {
+	if s != nil {
+		p.Pin(s)
+	}
+}
+
+func (p *pinner) pinBytes(b *byte) {
+	if b != nil {
+		p.Pin(b)
+	}
+}
+
+// credentialList builds a WEBAUTHN_CREDENTIAL_LIST for ids, pinning everything it allocates.
+func credentialList(p *pinner, ids [][]byte, typ *uint16) *CredentialList {
+	if len(ids) == 0 {
+		return nil
+	}
+	creds := make([]*CredentialEx, len(ids))
+	for i, id := range ids {
+		c := &CredentialEx{Version: WebAuthnCredentialExVersion1, IDLen: uint32(len(id)), Type: typ}
+		if len(id) > 0 {
+			idCopy := append([]byte(nil), id...)
+			c.ID = &idCopy[0]
+			p.Pin(c.ID)
+		}
+		p.Pin(c)
+		creds[i] = c
+	}
+	p.Pin(&creds[0])
+	list := &CredentialList{Count: uint32(len(creds)), Creds: &creds[0]}
+	p.Pin(list)
+	return list
+}
+
+func clientData(p *pinner, json []byte) *ClientData {
+	cd := &ClientData{
+		Version:        WebAuthnClientDataVersion1,
+		ClientDataJSON: uint32(len(json)),
+		HashAlgID:      UTF16PtrFromString(WebAuthnHashAlgorithmSHA256),
+	}
+	if len(json) > 0 {
+		cd.PBClientData = &json[0]
+	}
+	p.pinUTF16(cd.HashAlgID)
+	p.pinBytes(cd.PBClientData)
+	return cd
+}
+
 // MakeCredentialParams holds Go-typed parameters for MakeCredential.
 type MakeCredentialParams struct {
 	HWND             uintptr
@@ -60,7 +114,6 @@ type MakeCredentialParams struct {
 	UserID           []byte
 	UserName         string
 	UserDisplayName  string
-	Challenge        []byte
 	ClientDataJSON   []byte
 	Algorithms       []int32 // COSE algorithm IDs
 	UserVerification uint32
@@ -76,21 +129,28 @@ type MakeCredentialResult struct {
 	AuthenticatorData []byte
 }
 
-// MakeCredential calls WebAuthNAuthenticatorMakeCredential.
+// MakeCredential calls WebAuthNAuthenticatorMakeCredential with the platform
+// authenticator (Windows Hello) only.
 func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCredentialResult, error) {
 	if err := modWebAuthn.Load(); err != nil {
 		return nil, fmt.Errorf("webauthn: dll not available: %w", err)
 	}
+	if len(params.Algorithms) == 0 {
+		return nil, &WinError{Op: "MakeCredential", Kind: WinErrInvalidParam, HR: toHR(NTE_INVALID_PARAMETER)}
+	}
 
-	// RP info
-	rp := RPEntityInformation{
+	var p pinner
+	defer p.Unpin()
+
+	rp := &RPEntityInformation{
 		Version: WebAuthnRPEntityInformationVersion1,
 		ID:      UTF16PtrFromString(params.RPID),
 		Name:    UTF16PtrFromString(params.RPName),
 	}
+	p.pinUTF16(rp.ID)
+	p.pinUTF16(rp.Name)
 
-	// User info
-	user := UserEntityInformation{
+	user := &UserEntityInformation{
 		Version:     WebAuthnUserEntityInformationVersion1,
 		IDLen:       uint32(len(params.UserID)),
 		Name:        UTF16PtrFromString(params.UserName),
@@ -99,102 +159,55 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 	if len(params.UserID) > 0 {
 		user.ID = &params.UserID[0]
 	}
+	p.pinBytes(user.ID)
+	p.pinUTF16(user.Name)
+	p.pinUTF16(user.DisplayName)
 
-	// COSE credential parameters
-	coseParams := make([]CoseCredentialParameter, len(params.Algorithms))
 	pubKeyType := UTF16PtrFromString(WebAuthnCredentialTypePublicKey)
+	p.pinUTF16(pubKeyType)
+	coseParams := make([]CoseCredentialParameter, len(params.Algorithms))
 	for i, alg := range params.Algorithms {
-		coseParams[i] = CoseCredentialParameter{
-			Version:   WebAuthnCoseCredentialParameterVersion1,
-			Type:      pubKeyType,
-			Algorithm: alg,
-		}
+		coseParams[i] = CoseCredentialParameter{Version: WebAuthnCoseCredentialParameterVersion1, Type: pubKeyType, Algorithm: alg}
 	}
-	coseCredParams := CoseCredentialParameters{
-		Count:  uint32(len(coseParams)),
-		Params: &coseParams[0],
-	}
+	p.Pin(&coseParams[0])
+	coseCredParams := &CoseCredentialParameters{Count: uint32(len(coseParams)), Params: &coseParams[0]}
 
-	// Client data
-	hashAlg := UTF16PtrFromString(WebAuthnHashAlgorithmSHA256)
-	clientData := ClientData{
-		Version:        WebAuthnClientDataVersion1,
-		ClientDataJSON: uint32(len(params.ClientDataJSON)),
-		HashAlgID:      hashAlg,
-	}
-	if len(params.ClientDataJSON) > 0 {
-		clientData.PBClientData = &params.ClientDataJSON[0]
-	}
+	cd := clientData(&p, params.ClientDataJSON)
 
-	// Options
 	timeoutMS := params.TimeoutMS
 	if timeoutMS == 0 {
-		timeoutMS = 60000 // 60 second default
+		timeoutMS = 60000
 	}
-	opts := AuthMakeCredentialOptions{
+	opts := &AuthMakeCredentialOptions{
 		Version:                         WebAuthnAuthenticatorMakeCredentialOptionsVersion3,
 		TimeoutMilliseconds:             timeoutMS,
+		AuthenticatorAttachment:         WebAuthnAuthenticatorAttachmentPlatform,
 		UserVerificationRequirement:     params.UserVerification,
 		AttestationConveyancePreference: params.AttestationPref,
+		ExcludeCredentialList:           credentialList(&p, params.ExcludeIDs, pubKeyType),
+	}
+	cancelID := new(GUID)
+	if err := getCancellationID(cancelID); err == nil {
+		opts.CancellationID = cancelID
+		p.Pin(cancelID)
 	}
 
-	// Cancellation ID for context support
-	var cancelID GUID
-	if err := getCancellationID(&cancelID); err == nil {
-		opts.CancellationID = &cancelID
-	}
-
-	// Exclude credentials
-	if len(params.ExcludeIDs) > 0 {
-		excludeEx := make([]*CredentialEx, len(params.ExcludeIDs))
-		for i, id := range params.ExcludeIDs {
-			credEx := &CredentialEx{
-				Version: WebAuthnCredentialExVersion1,
-				IDLen:   uint32(len(id)),
-				Type:    pubKeyType,
-			}
-			if len(id) > 0 {
-				idCopy := append([]byte(nil), id...)
-				credEx.ID = &idCopy[0]
-			}
-			excludeEx[i] = credEx
-		}
-		excludeList := &CredentialList{
-			Count: uint32(len(excludeEx)),
-			Creds: &excludeEx[0],
-		}
-		opts.ExcludeCredentialList = excludeList
-	}
-
-	// Channel for async result
 	type result struct {
 		r   *MakeCredentialResult
 		err error
 	}
 	ch := make(chan result, 1)
-
 	go func() {
 		var attestation *CredentialAttestation
 		hr, _, _ := procAuthenticatorMakeCredential.Call(
 			params.HWND,
-			uintptr(unsafe.Pointer(&rp)),
-			uintptr(unsafe.Pointer(&user)),
-			uintptr(unsafe.Pointer(&coseCredParams)),
-			uintptr(unsafe.Pointer(&clientData)),
-			uintptr(unsafe.Pointer(&opts)),
+			uintptr(unsafe.Pointer(rp)),
+			uintptr(unsafe.Pointer(user)),
+			uintptr(unsafe.Pointer(coseCredParams)),
+			uintptr(unsafe.Pointer(cd)),
+			uintptr(unsafe.Pointer(opts)),
 			uintptr(unsafe.Pointer(&attestation)),
 		)
-		// Prevent GC from collecting Go-allocated structs before the blocking DLL call returns.
-		runtime.KeepAlive(&rp)
-		runtime.KeepAlive(&user)
-		runtime.KeepAlive(&coseCredParams)
-		runtime.KeepAlive(coseParams)
-		runtime.KeepAlive(&clientData)
-		runtime.KeepAlive(&cancelID)
-		runtime.KeepAlive(&opts)
-		if len(params.ExcludeIDs) > 0 {
-			runtime.KeepAlive(opts.ExcludeCredentialList)
-		}
 		if err := HRESULTToError("MakeCredential", hr); err != nil {
 			ch <- result{err: err}
 			return
@@ -204,7 +217,7 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 			return
 		}
 		res := copyAttestationResult(attestation)
-		procFreeCredentialAttestation.Call(uintptr(unsafe.Pointer(attestation)))
+		procFreeCredentialAttestation.Call(uintptr(unsafe.Pointer(attestation))) //nolint:errcheck
 		ch <- result{r: res}
 	}()
 
@@ -212,8 +225,8 @@ func MakeCredential(ctx context.Context, params *MakeCredentialParams) (*MakeCre
 	case res := <-ch:
 		return res.r, res.err
 	case <-ctx.Done():
-		cancelOperation(&cancelID)
-		<-ch // wait for goroutine to finish
+		cancelOperation(cancelID)
+		<-ch // the call returns once canceled; the pinned memory must outlive it
 		return nil, ctx.Err()
 	}
 }
@@ -250,61 +263,35 @@ type GetAssertionResult struct {
 	UserID            []byte
 }
 
-// GetAssertion calls WebAuthNAuthenticatorGetAssertion.
+// GetAssertion calls WebAuthNAuthenticatorGetAssertion with the platform authenticator only.
 func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertionResult, error) {
 	if err := modWebAuthn.Load(); err != nil {
 		return nil, fmt.Errorf("webauthn: dll not available: %w", err)
 	}
 
-	rpID := UTF16PtrFromString(params.RPID)
-	hashAlg := UTF16PtrFromString(WebAuthnHashAlgorithmSHA256)
+	var p pinner
+	defer p.Unpin()
 
-	clientData := ClientData{
-		Version:        WebAuthnClientDataVersion1,
-		ClientDataJSON: uint32(len(params.ClientDataJSON)),
-		HashAlgID:      hashAlg,
-	}
-	if len(params.ClientDataJSON) > 0 {
-		clientData.PBClientData = &params.ClientDataJSON[0]
-	}
+	rpID := UTF16PtrFromString(params.RPID)
+	cd := clientData(&p, params.ClientDataJSON)
+	pubKeyType := UTF16PtrFromString(WebAuthnCredentialTypePublicKey)
+	p.pinUTF16(pubKeyType)
 
 	timeoutMS := params.TimeoutMS
 	if timeoutMS == 0 {
 		timeoutMS = 60000
 	}
-	opts := AuthGetAssertionOptions{
+	opts := &AuthGetAssertionOptions{
 		Version:                     WebAuthnAuthenticatorGetAssertionOptionsVersion4,
 		TimeoutMilliseconds:         timeoutMS,
+		AuthenticatorAttachment:     WebAuthnAuthenticatorAttachmentPlatform,
 		UserVerificationRequirement: params.UserVerification,
+		AllowCredentialList:         credentialList(&p, params.AllowIDs, pubKeyType),
 	}
-
-	// Cancellation
-	var cancelID GUID
-	if err := getCancellationID(&cancelID); err == nil {
-		opts.CancellationID = &cancelID
-	}
-
-	// Allow credentials
-	pubKeyType := UTF16PtrFromString(WebAuthnCredentialTypePublicKey)
-	if len(params.AllowIDs) > 0 {
-		allowEx := make([]*CredentialEx, len(params.AllowIDs))
-		for i, id := range params.AllowIDs {
-			credEx := &CredentialEx{
-				Version: WebAuthnCredentialExVersion1,
-				IDLen:   uint32(len(id)),
-				Type:    pubKeyType,
-			}
-			if len(id) > 0 {
-				idCopy := append([]byte(nil), id...)
-				credEx.ID = &idCopy[0]
-			}
-			allowEx[i] = credEx
-		}
-		allowList := &CredentialList{
-			Count: uint32(len(allowEx)),
-			Creds: &allowEx[0],
-		}
-		opts.AllowCredentialList = allowList
+	cancelID := new(GUID)
+	if err := getCancellationID(cancelID); err == nil {
+		opts.CancellationID = cancelID
+		p.Pin(cancelID)
 	}
 
 	type result struct {
@@ -312,24 +299,15 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 		err error
 	}
 	ch := make(chan result, 1)
-
 	go func() {
 		var assertion *Assertion
 		hr, _, _ := procAuthenticatorGetAssertion.Call(
 			params.HWND,
 			uintptr(unsafe.Pointer(rpID)),
-			uintptr(unsafe.Pointer(&clientData)),
-			uintptr(unsafe.Pointer(&opts)),
+			uintptr(unsafe.Pointer(cd)),
+			uintptr(unsafe.Pointer(opts)),
 			uintptr(unsafe.Pointer(&assertion)),
 		)
-		// Prevent GC from collecting Go-allocated structs before the blocking DLL call returns.
-		runtime.KeepAlive(rpID)
-		runtime.KeepAlive(&clientData)
-		runtime.KeepAlive(&cancelID)
-		runtime.KeepAlive(&opts)
-		if len(params.AllowIDs) > 0 {
-			runtime.KeepAlive(opts.AllowCredentialList)
-		}
 		if err := HRESULTToError("GetAssertion", hr); err != nil {
 			ch <- result{err: err}
 			return
@@ -339,7 +317,7 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 			return
 		}
 		res := copyAssertionResult(assertion)
-		procFreeAssertion.Call(uintptr(unsafe.Pointer(assertion)))
+		procFreeAssertion.Call(uintptr(unsafe.Pointer(assertion))) //nolint:errcheck
 		ch <- result{r: res}
 	}()
 
@@ -347,7 +325,7 @@ func GetAssertion(ctx context.Context, params *GetAssertionParams) (*GetAssertio
 	case res := <-ch:
 		return res.r, res.err
 	case <-ctx.Done():
-		cancelOperation(&cancelID)
+		cancelOperation(cancelID)
 		<-ch
 		return nil, ctx.Err()
 	}
@@ -370,6 +348,21 @@ func copyAssertionResult(a *Assertion) *GetAssertionResult {
 	return res
 }
 
+// DeletePlatformCredential deletes a Windows Hello credential (API version 4+).
+func DeletePlatformCredential(credentialID []byte) error {
+	if len(credentialID) == 0 {
+		return &WinError{Op: "DeletePlatformCredential", Kind: WinErrInvalidParam, HR: toHR(NTE_INVALID_PARAMETER)}
+	}
+	if APIVersionNumber() < WebAuthnAPIVersion4 {
+		return &WinError{Op: "DeletePlatformCredential", Kind: WinErrNotSupported, HR: toHR(NTE_NOT_SUPPORTED)}
+	}
+	if err := procDeletePlatformCredential.Find(); err != nil {
+		return &WinError{Op: "DeletePlatformCredential", Kind: WinErrNotSupported, HR: toHR(NTE_NOT_SUPPORTED)}
+	}
+	hr, _, _ := procDeletePlatformCredential.Call(uintptr(len(credentialID)), uintptr(unsafe.Pointer(&credentialID[0])))
+	return HRESULTToError("DeletePlatformCredential", hr)
+}
+
 func getCancellationID(id *GUID) error {
 	if err := procGetCancellationID.Find(); err != nil {
 		return err
@@ -382,5 +375,5 @@ func cancelOperation(id *GUID) {
 	if err := procCancelCurrentOperation.Find(); err != nil {
 		return
 	}
-	procCancelCurrentOperation.Call(uintptr(unsafe.Pointer(id)))
+	procCancelCurrentOperation.Call(uintptr(unsafe.Pointer(id))) //nolint:errcheck
 }
