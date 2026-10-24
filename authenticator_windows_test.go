@@ -164,7 +164,7 @@ func TestWindows_ParameterMapping(t *testing.T) {
 
 func TestTimeoutMS(t *testing.T) {
 	for d, want := range map[time.Duration]uint32{
-		0: 60000, -time.Second: 60000, time.Microsecond: 1, 2 * time.Second: 2000, 1000 * time.Hour: 1<<32 - 1,
+		0: 60000, -time.Second: 60000, time.Microsecond: 1, 2 * time.Second: 2000, 2000 * time.Hour: 1<<32 - 1, 1193 * time.Hour: 4294800000,
 	} {
 		if got := timeoutMS(d); got != want {
 			t.Errorf("timeoutMS(%v) = %d, want %d", d, got, want)
