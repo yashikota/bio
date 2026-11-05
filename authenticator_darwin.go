@@ -10,56 +10,45 @@ import (
 	"github.com/yashikota/bio/internal/darwin"
 )
 
-type darwinAuthenticator struct {
-	cfg *config
-}
+// On macOS, user verification is LocalAuthentication (Touch ID / Face ID /
+// Optic ID). By default keys are software P-256 keys in the login Keychain
+// and the biometric check happens in this process only: code running in the
+// same process, or another app the Keychain item's ACL trusts, can sign
+// without biometrics. WithSecureEnclave makes the OS enforce it instead.
 
 func newAuthenticator(opts ...Option) (Authenticator, error) {
-	cfg := defaultConfig()
-	for _, o := range opts {
-		o(cfg)
-	}
-	return &darwinAuthenticator{cfg: cfg}, nil
+	cfg := newConfig(opts)
+	keys := &keychainStore{namespace: cfg.namespace, opts: darwin.KeyOptions{SecureEnclave: cfg.secureEnclave}}
+	return newDarwinAuthenticator(cfg, laVerifier{}, keys), nil
 }
 
-func (a *darwinAuthenticator) Available(_ context.Context) (BiometryInfo, error) {
-	canEval, biometryType, err := darwin.CheckAvailability(darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics)
-	if err != nil {
-		return BiometryInfo{}, mapLAError("Available", err)
+func newDarwinAuthenticator(cfg *config, v userVerifier, keys keyStore) *localAuthenticator {
+	return &localAuthenticator{
+		cfg:       cfg,
+		verifier:  v,
+		keys:      keys,
+		available: darwinAvailable,
+		mapErr:    mapDarwinError,
 	}
-	return BiometryInfo{
-		Available:    canEval,
-		BiometryType: mapBiometryType(biometryType),
-		Enrolled:     biometryType != darwin.LABiometryTypeNone,
-	}, nil
 }
 
-// mapLAError converts a darwin.LAError into the appropriate bio package error.
-func mapLAError(op string, err error) error {
-	if err == nil {
-		return nil
-	}
+func darwinAvailable(context.Context) (BiometryInfo, error) {
+	canEval, bt, err := darwin.CheckAvailability(darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics)
+	info := BiometryInfo{Available: canEval, BiometryType: mapBiometryType(bt), Enrolled: canEval}
 	var laErr *darwin.LAError
-	if !errors.As(err, &laErr) {
-		return err
+	if errors.As(err, &laErr) {
+		switch laErr.Code {
+		case darwin.LAErrorBiometryNotAvailable, darwin.LAErrorBiometryNotEnrolled, darwin.LAErrorPasscodeNotSet:
+			return info, nil
+		case darwin.LAErrorBiometryLockout:
+			info.Enrolled = true
+			return info, nil
+		}
 	}
-	switch laErr.Code {
-	case darwin.LAErrorUserCancel, darwin.LAErrorUserFallback, darwin.LAErrorSystemCancel, darwin.LAErrorAppCancel:
-		return ErrUserCanceled
-	case darwin.LAErrorPasscodeNotSet, darwin.LAErrorBiometryNotEnrolled:
-		return ErrNotEnrolled
-	case darwin.LAErrorBiometryNotAvailable:
-		return ErrNotAvailable
-	case darwin.LAErrorBiometryLockout:
-		return &PlatformError{Op: op, Platform: "darwin", Code: laErr.Code,
-			Err: fmt.Errorf("biometry locked out")}
-	case darwin.LAErrorAuthenticationFailed:
-		return &PlatformError{Op: op, Platform: "darwin", Code: laErr.Code,
-			Err: fmt.Errorf("authentication failed")}
-	default:
-		return &PlatformError{Op: op, Platform: "darwin", Code: laErr.Code,
-			Err: fmt.Errorf("platform error")}
+	if err != nil {
+		return info, mapDarwinError("Available", err)
 	}
+	return info, nil
 }
 
 func mapBiometryType(t int64) BiometryType {
@@ -75,152 +64,122 @@ func mapBiometryType(t int64) BiometryType {
 	}
 }
 
-func (a *darwinAuthenticator) MakeCredential(ctx context.Context, opts MakeCredentialOptions) (*Credential, error) {
-	if len(opts.Challenge) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	if opts.RP.ID == "" {
-		return nil, ErrInvalidParameter
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+// laVerifier evaluates the biometrics policy with a fresh LAContext.
+type laVerifier struct{}
 
-	if len(opts.ClientDataJSON) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	clientDataJSON := opts.ClientDataJSON
+// laVerification keeps the evaluated LAContext so that a Secure Enclave key can use it.
+type laVerification struct{ ctx *darwin.LAContext }
 
-	// Generate credential ID
-	credID, err := darwin.GenerateCredentialID()
+func (v *laVerification) Release() { v.ctx.Release() }
+
+func (laVerifier) VerifyUser(ctx context.Context, reason string) (verification, error) {
+	la, err := darwin.NewLAContext()
 	if err != nil {
 		return nil, err
 	}
-
-	// Build Keychain application tag
-	tag := darwin.KeychainTag(opts.RP.ID, credID)
-
-	// Authenticate with biometrics before creating the key
-	reason := a.cfg.localizedReason
-	if reason == "" {
-		reason = "Register with " + opts.RP.Name
-	}
-	if authErr := darwin.Authenticate(darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics, reason); authErr != nil {
-		return nil, mapLAError("MakeCredential", authErr)
-	}
-
-	// Create EC P-256 key stored in Keychain (biometric confirmed above)
-	label := opts.RP.Name + "/" + opts.User.Name
-	privKey, err := darwin.CreateBiometricKey(label, tag)
-	if err != nil {
+	if err := la.Evaluate(ctx, darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics, reason); err != nil {
+		la.Release()
 		return nil, err
 	}
-	defer darwin.ReleaseKey(privKey)
-
-	// Export COSE public key
-	coseKey, err := darwin.ExportPublicKeyCOSE(privKey)
-	if err != nil {
-		_ = darwin.DeleteCredential(opts.RP.ID, credID)
-		return nil, err
-	}
-
-	// Build authenticator data (FIDO2 §6.1)
-	var aaguid [16]byte // zero AAGUID for self-attestation
-	flags := byte(darwin.FlagUP | darwin.FlagUV | darwin.FlagAT)
-	authData := darwin.BuildAuthenticatorData(opts.RP.ID, flags, 0, aaguid, credID, coseKey)
-
-	// Build attestation object — "none" attestation, CBOR encoded
-	attObj := darwin.EncodeMap(
-		darwin.EncodeText("fmt"), darwin.EncodeText("none"),
-		darwin.EncodeText("attStmt"), darwin.EncodeMap(),
-		darwin.EncodeText("authData"), darwin.EncodeBytes(authData),
-	)
-
-	return &Credential{
-		ID:                credID,
-		PublicKey:         coseKey,
-		AttestationObject: attObj,
-		ClientDataJSON:    clientDataJSON,
-		AuthenticatorData: authData,
-		Transport:         []string{"internal"},
-	}, nil
+	return &laVerification{ctx: la}, nil
 }
 
-func (a *darwinAuthenticator) GetAssertion(ctx context.Context, opts GetAssertionOptions) (*Assertion, error) {
-	if len(opts.Challenge) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	if opts.RPID == "" {
-		return nil, ErrInvalidParameter
-	}
+// keychainStore keeps credential keys in the Keychain, tagged
+// "<namespace>:<rpID>:<credentialID>", and the user handle in a generic
+// password item beside each key. macOS keys have no signature counter.
+type keychainStore struct {
+	namespace string
+	opts      darwin.KeyOptions
+}
 
-	if len(opts.ClientDataJSON) == 0 {
-		return nil, ErrInvalidParameter
-	}
-	clientDataJSON := opts.ClientDataJSON
-	cdHash := clientDataHash(clientDataJSON)
+func (s *keychainStore) tag(rpID string, credID []byte) []byte {
+	return darwin.KeychainTag(s.namespace, rpID, credID)
+}
 
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+func (s *keychainStore) service(rpID string) string {
+	return s.namespace + ":" + rpID + ":user-handle"
+}
 
-	// Find the private key. If AllowCredentials is empty, credential scan is not supported.
-	if len(opts.AllowCredentials) == 0 {
-		return nil, ErrNoCredentials
-	}
-
-	var privKey darwin.SecKeyRefValue
-	var usedCredID []byte
-	var lastErr error
-
-	for _, desc := range opts.AllowCredentials {
-		tag := darwin.KeychainTag(opts.RPID, desc.ID)
-		k, err := darwin.LookupPrivateKey(tag)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		privKey = k
-		usedCredID = desc.ID
-		break
-	}
-
-	if usedCredID == nil {
-		if lastErr != nil {
-			return nil, lastErr
-		}
-		return nil, ErrNoCredentials
-	}
-	defer darwin.ReleaseKey(privKey)
-
-	// Authenticate with biometrics before signing
-	reason := a.cfg.localizedReason
-	if reason == "" {
-		reason = "Sign in to " + opts.RPID
-	}
-	if authErr := darwin.Authenticate(darwin.LAPolicyDeviceOwnerAuthenticationWithBiometrics, reason); authErr != nil {
-		return nil, mapLAError("GetAssertion", authErr)
-	}
-
-	// Build authenticator data (no attested credential data for assertions)
-	flags := byte(darwin.FlagUP | darwin.FlagUV)
-	authData := darwin.BuildGetAssertionAuthData(opts.RPID, flags, 0)
-
-	// Sign: authData || clientDataHash (FIDO2 spec §6.3.3).
-	// Use make+copy to avoid mutating authData's backing array (returned in Assertion).
-	dataToSign := make([]byte, len(authData)+len(cdHash))
-	copy(dataToSign, authData)
-	copy(dataToSign[len(authData):], cdHash)
-	sig, err := darwin.Sign(privKey, dataToSign)
+func (s *keychainStore) Create(_ context.Context, _ verification, rpID string, credID []byte, user User) ([]byte, error) {
+	label := rpID + "/" + user.Name
+	raw, err := darwin.CreateKey(label, s.tag(rpID, credID), s.opts)
 	if err != nil {
 		return nil, err
 	}
+	if len(user.ID) > 0 {
+		if err := darwin.StoreData(s.service(rpID), credID, user.ID, s.opts); err != nil {
+			_ = darwin.DeleteKey(s.tag(rpID, credID), s.opts)
+			return nil, err
+		}
+	}
+	return raw, nil
+}
 
-	return &Assertion{
-		CredentialID:      usedCredID,
-		AuthenticatorData: authData,
-		Signature:         sig,
-		UserHandle:        nil, // not stored in Keychain tag
-		ClientDataJSON:    clientDataJSON,
-	}, nil
+func (s *keychainStore) Lookup(rpID string, credID []byte) (*storedKey, error) {
+	ok, err := darwin.KeyExists(s.tag(rpID, credID), s.opts)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errKeyNotFound
+	}
+	uh, err := darwin.LoadData(s.service(rpID), credID, s.opts)
+	if err != nil && !errors.Is(err, darwin.ErrNotFound) {
+		return nil, err
+	}
+	return &storedKey{CredentialID: credID, UserHandle: uh, handle: rpID}, nil
+}
+
+func (s *keychainStore) NextSignCount(string, *storedKey) (uint32, error) { return 0, nil }
+
+func (s *keychainStore) Sign(_ context.Context, v verification, k *storedKey, data []byte) ([]byte, error) {
+	var la *darwin.LAContext
+	if lv, ok := v.(*laVerification); ok {
+		la = lv.ctx
+	}
+	sig, err := darwin.Sign(s.tag(k.handle.(string), k.CredentialID), s.opts, la, data)
+	if errors.Is(err, darwin.ErrNotFound) {
+		return nil, ErrNoCredentials
+	}
+	return sig, err
+}
+
+func (s *keychainStore) Delete(rpID string, credID []byte) error {
+	err := darwin.DeleteKey(s.tag(rpID, credID), s.opts)
+	if dErr := darwin.DeleteData(s.service(rpID), credID, s.opts); dErr != nil && !errors.Is(dErr, darwin.ErrNotFound) && err == nil {
+		err = dErr
+	}
+	if errors.Is(err, darwin.ErrNotFound) {
+		return errKeyNotFound
+	}
+	return err
+}
+
+func mapDarwinError(op string, err error) error {
+	var laErr *darwin.LAError
+	if errors.As(err, &laErr) {
+		switch laErr.Code {
+		case darwin.LAErrorUserCancel, darwin.LAErrorUserFallback, darwin.LAErrorSystemCancel, darwin.LAErrorAppCancel:
+			return ErrUserCanceled
+		case darwin.LAErrorPasscodeNotSet, darwin.LAErrorBiometryNotEnrolled:
+			return ErrNotEnrolled
+		case darwin.LAErrorBiometryNotAvailable:
+			return ErrNotAvailable
+		case darwin.LAErrorBiometryLockout:
+			return &PlatformError{Op: op, Platform: "darwin", Code: laErr.Code, Err: errors.New("biometry locked out")}
+		case darwin.LAErrorAuthenticationFailed:
+			return &PlatformError{Op: op, Platform: "darwin", Code: laErr.Code, Err: errors.New("authentication failed")}
+		default:
+			return &PlatformError{Op: op, Platform: "darwin", Code: laErr.Code, Err: err}
+		}
+	}
+	var secErr *darwin.SecError
+	if errors.As(err, &secErr) {
+		pe := &PlatformError{Op: op, Platform: "darwin", Code: secErr.Status, Err: err}
+		if secErr.MissingEntitlement() {
+			pe.Err = fmt.Errorf("%w (WithSecureEnclave needs a code-signed app with the keychain-access-groups entitlement)", err)
+		}
+		return pe
+	}
+	return &PlatformError{Op: op, Platform: "darwin", Err: err}
 }

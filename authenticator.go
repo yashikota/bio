@@ -7,6 +7,9 @@ type Authenticator interface {
 	Available(ctx context.Context) (BiometryInfo, error)
 	MakeCredential(ctx context.Context, opts MakeCredentialOptions) (*Credential, error)
 	GetAssertion(ctx context.Context, opts GetAssertionOptions) (*Assertion, error)
+	// DeleteCredential removes a credential created by MakeCredential.
+	// It returns ErrNoCredentials if the credential does not exist.
+	DeleteCredential(ctx context.Context, rpID string, credentialID []byte) error
 }
 
 // BiometryType indicates the type of biometric sensor.

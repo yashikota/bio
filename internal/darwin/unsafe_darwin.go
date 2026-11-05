@@ -2,26 +2,48 @@
 
 package darwin
 
-import "unsafe"
+import (
+	"sync"
+	"unsafe"
 
-// derefUintptr reads the uintptr value at the C library address addr.
-// addr must point to OS/C library memory that the GC does not manage.
-// Implemented in assembly to avoid the go vet unsafeptr false positive.
-func derefUintptr(addr uintptr) uintptr
+	"github.com/ebitengine/purego"
+)
 
-// copyBytesFromC copies n bytes from the C memory address src into a new Go []byte.
-// src must point to C/CF-managed memory that the GC does not manage.
-// This avoids the go vet unsafeptr false positive by routing through
-// a pointer to a Go-allocated buffer rather than converting the C pointer directly.
+// C memory (Dlsym symbol addresses, CFData bytes) is read with libc's memcpy
+// instead of converting a uintptr to unsafe.Pointer, which go vet flags and
+// which is not a valid Go pointer anyway.
+
+var (
+	memcpyOnce sync.Once
+	memcpyErr  error
+	fnMemcpy   func(dst unsafe.Pointer, src uintptr, n uintptr) uintptr
+)
+
+func loadMemcpy() error {
+	memcpyOnce.Do(func() {
+		libc, err := purego.Dlopen("/usr/lib/libSystem.B.dylib", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		if err != nil {
+			memcpyErr = err
+			return
+		}
+		purego.RegisterLibFunc(&fnMemcpy, libc, "memcpy")
+	})
+	return memcpyErr
+}
+
+// derefUintptr reads the pointer-sized value stored at the C address addr.
+func derefUintptr(addr uintptr) uintptr {
+	var v uintptr
+	fnMemcpy(unsafe.Pointer(&v), addr, unsafe.Sizeof(v))
+	return v
+}
+
+// copyBytesFromC copies n bytes of C memory at src into a new Go slice.
 func copyBytesFromC(src uintptr, n int) []byte {
-	if n <= 0 {
+	if src == 0 || n <= 0 {
 		return nil
 	}
 	dst := make([]byte, n)
-	copyFromC(src, unsafe.Pointer(&dst[0]), n)
+	fnMemcpy(unsafe.Pointer(&dst[0]), src, uintptr(n))
 	return dst
 }
-
-// copyFromC copies n bytes from C address src to Go address dst.
-// Implemented in assembly to avoid go vet unsafeptr on the C src pointer.
-func copyFromC(src uintptr, dst unsafe.Pointer, n int)

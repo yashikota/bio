@@ -3,7 +3,8 @@
 package darwin
 
 import (
-	"crypto/rand"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"sync"
 	"unsafe"
@@ -23,22 +24,23 @@ type secKeyRef cfTypeRef
 type secAccessControlRef cfTypeRef
 
 var (
-	secOnce   sync.Once
-	secErr    error
-	cfHandle  uintptr
-	secHandle uintptr
+	secOnce sync.Once
+	secErr  error
 
-	// CoreFoundation functions
-	fnCFStringCreateWithCString func(alloc, cStr uintptr, encoding uint32) cfStringRef
-	fnCFDataCreate              func(alloc uintptr, bytes uintptr, length int) cfDataRef
-	fnCFDictionaryCreateMutable func(alloc uintptr, capacity int, keyCallBacks, valueCallBacks uintptr) cfMutableDictionaryRef
-	fnCFDictionaryAddValue      func(dict cfMutableDictionaryRef, key, value uintptr)
-	fnCFNumberCreate            func(alloc uintptr, theType int, valuePtr uintptr) cfNumberRef
-	fnCFRelease                 func(cf cfTypeRef)
-	fnCFDataGetBytePtr          func(data cfDataRef) uintptr
-	fnCFDataGetLength           func(data cfDataRef) int
+	fnCFStringCreateWithCString         func(alloc, cStr uintptr, encoding uint32) cfStringRef
+	fnCFDataCreate                      func(alloc uintptr, bytes uintptr, length int) cfDataRef
+	fnCFDictionaryCreateMutable         func(alloc uintptr, capacity int, keyCallBacks, valueCallBacks uintptr) cfMutableDictionaryRef
+	fnCFDictionaryAddValue              func(dict cfMutableDictionaryRef, key, value uintptr)
+	fnCFNumberCreate                    func(alloc uintptr, theType int, valuePtr uintptr) cfNumberRef
+	fnCFRelease                         func(cf cfTypeRef)
+	fnCFDataGetBytePtr                  func(data cfDataRef) uintptr
+	fnCFDataGetLength                   func(data cfDataRef) int
+	fnCFErrorGetCode                    func(err cfErrorRef) int64
+	fnCFErrorCopyDescription            func(err cfErrorRef) cfStringRef
+	fnCFStringGetLength                 func(s cfStringRef) int
+	fnCFStringGetMaximumSizeForEncoding func(length int, encoding uint32) int
+	fnCFStringGetCString                func(s cfStringRef, buf uintptr, bufSize int, encoding uint32) bool
 
-	// Security functions
 	fnSecAccessControlCreateWithFlags  func(alloc uintptr, protection uintptr, flags uint64, err *cfErrorRef) secAccessControlRef
 	fnSecKeyCreateRandomKey            func(parameters cfDictionaryRef, err *cfErrorRef) secKeyRef
 	fnSecKeyCopyPublicKey              func(key secKeyRef) secKeyRef
@@ -48,176 +50,202 @@ var (
 	fnSecItemCopyMatching              func(query cfDictionaryRef, result *uintptr) int32
 	fnSecItemAdd                       func(attrs cfDictionaryRef, result *uintptr) int32
 
-	// CFError inspection
-	fnCFErrorGetCode         func(err cfErrorRef) int64
-	fnCFErrorCopyDescription func(err cfErrorRef) cfStringRef
-	fnCFStringGetCString     func(s cfStringRef, buf uintptr, bufSize int, encoding uint32) bool
-
-	// CF constants loaded via Dlsym
+	// Constants loaded with Dlsym.
 	kCFAllocatorDefault                             uintptr
-	kSecAttrKeyTypeECSECPrimeRandom                 uintptr
-	kSecAttrTokenIDSecureEnclave                    uintptr
+	kCFBooleanTrue                                  uintptr
+	kCFTypeDictionaryKeyCallBacks                   uintptr
+	kCFTypeDictionaryValueCallBacks                 uintptr
 	kSecAttrKeyType                                 uintptr
+	kSecAttrKeyTypeECSECPrimeRandom                 uintptr
 	kSecAttrKeySizeInBits                           uintptr
+	kSecAttrKeyClass                                uintptr
+	kSecAttrKeyClassPrivate                         uintptr
 	kSecAttrTokenID                                 uintptr
+	kSecAttrTokenIDSecureEnclave                    uintptr
 	kSecAttrAccessControl                           uintptr
+	kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly uintptr
 	kSecAttrLabel                                   uintptr
 	kSecAttrApplicationTag                          uintptr
 	kSecAttrIsPermanent                             uintptr
-	kSecUseDataProtectionKeychain                   uintptr
-	kCFBooleanTrue                                  uintptr
-	kCFBooleanFalse                                 uintptr
-	kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly uintptr
-	kSecKeyAlgorithmECDSASignatureMessageX962SHA256 uintptr
+	kSecAttrService                                 uintptr
+	kSecAttrAccount                                 uintptr
 	kSecPrivateKeyAttrs                             uintptr
-
-	// CF dictionary callbacks (must be passed to CFDictionaryCreateMutable)
-	kCFTypeDictionaryKeyCallBacks   uintptr
-	kCFTypeDictionaryValueCallBacks uintptr
-
-	// For Keychain queries
-	kSecClass         uintptr
-	kSecClassKey      uintptr
-	kSecReturnRef     uintptr
-	kSecMatchLimit    uintptr
-	kSecMatchLimitOne uintptr
-	kSecValueRef      uintptr
+	kSecUseDataProtectionKeychain                   uintptr
+	kSecUseAuthenticationContext                    uintptr
+	kSecKeyAlgorithmECDSASignatureMessageX962SHA256 uintptr
+	kSecClass                                       uintptr
+	kSecClassKey                                    uintptr
+	kSecClassGenericPassword                        uintptr
+	kSecReturnRef                                   uintptr
+	kSecReturnData                                  uintptr
+	kSecValueData                                   uintptr
+	kSecMatchLimit                                  uintptr
+	kSecMatchLimitOne                               uintptr
 )
 
 const (
 	kCFStringEncodingUTF8 = uint32(0x08000100)
 	kCFNumberSInt32Type   = 3
 
-	// SecAccessControlCreateFlags enum values (CF_OPTIONS, not exported as dylib symbols).
-	// Source: Security/SecAccessControl.h
-	kSecAccessControlBiometryAny        uint64 = 1 << 1 // kSecAccessControlTouchIDAny renamed
-	kSecAccessControlBiometryCurrentSet uint64 = 1 << 3 // kSecAccessControlTouchIDCurrentSet renamed
+	// SecAccessControlCreateFlags (CF_OPTIONS, not exported as symbols). Source: Security/SecAccessControl.h
+	kSecAccessControlBiometryCurrentSet uint64 = 1 << 3
 	kSecAccessControlPrivateKeyUsage    uint64 = 1 << 30
 )
 
 // OSStatus values.
 const (
-	errSecSuccess      = int32(0)
-	errSecItemNotFound = int32(-25300)
+	errSecSuccess            = int32(0)
+	errSecDuplicateItem      = int32(-25299)
+	errSecItemNotFound       = int32(-25300)
+	errSecMissingEntitlement = int64(-34018)
 )
 
-func loadSecurity() {
+func loadSecurity() error {
 	secOnce.Do(func() {
-		var err error
-		cfHandle, err = purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		if err := loadMemcpy(); err != nil {
+			secErr = fmt.Errorf("darwin: load libSystem: %w", err)
+			return
+		}
+		cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_NOW|purego.RTLD_GLOBAL)
 		if err != nil {
 			secErr = fmt.Errorf("darwin: load CoreFoundation: %w", err)
 			return
 		}
-		secHandle, err = purego.Dlopen("/System/Library/Frameworks/Security.framework/Security", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		sec, err := purego.Dlopen("/System/Library/Frameworks/Security.framework/Security", purego.RTLD_NOW|purego.RTLD_GLOBAL)
 		if err != nil {
 			secErr = fmt.Errorf("darwin: load Security: %w", err)
 			return
 		}
 
-		purego.RegisterLibFunc(&fnCFStringCreateWithCString, cfHandle, "CFStringCreateWithCString")
-		purego.RegisterLibFunc(&fnCFDataCreate, cfHandle, "CFDataCreate")
-		purego.RegisterLibFunc(&fnCFDictionaryCreateMutable, cfHandle, "CFDictionaryCreateMutable")
-		purego.RegisterLibFunc(&fnCFDictionaryAddValue, cfHandle, "CFDictionaryAddValue")
-		purego.RegisterLibFunc(&fnCFNumberCreate, cfHandle, "CFNumberCreate")
-		purego.RegisterLibFunc(&fnCFRelease, cfHandle, "CFRelease")
-		purego.RegisterLibFunc(&fnCFDataGetBytePtr, cfHandle, "CFDataGetBytePtr")
-		purego.RegisterLibFunc(&fnCFDataGetLength, cfHandle, "CFDataGetLength")
+		purego.RegisterLibFunc(&fnCFStringCreateWithCString, cf, "CFStringCreateWithCString")
+		purego.RegisterLibFunc(&fnCFDataCreate, cf, "CFDataCreate")
+		purego.RegisterLibFunc(&fnCFDictionaryCreateMutable, cf, "CFDictionaryCreateMutable")
+		purego.RegisterLibFunc(&fnCFDictionaryAddValue, cf, "CFDictionaryAddValue")
+		purego.RegisterLibFunc(&fnCFNumberCreate, cf, "CFNumberCreate")
+		purego.RegisterLibFunc(&fnCFRelease, cf, "CFRelease")
+		purego.RegisterLibFunc(&fnCFDataGetBytePtr, cf, "CFDataGetBytePtr")
+		purego.RegisterLibFunc(&fnCFDataGetLength, cf, "CFDataGetLength")
+		purego.RegisterLibFunc(&fnCFErrorGetCode, cf, "CFErrorGetCode")
+		purego.RegisterLibFunc(&fnCFErrorCopyDescription, cf, "CFErrorCopyDescription")
+		purego.RegisterLibFunc(&fnCFStringGetLength, cf, "CFStringGetLength")
+		purego.RegisterLibFunc(&fnCFStringGetMaximumSizeForEncoding, cf, "CFStringGetMaximumSizeForEncoding")
+		purego.RegisterLibFunc(&fnCFStringGetCString, cf, "CFStringGetCString")
 
-		purego.RegisterLibFunc(&fnSecAccessControlCreateWithFlags, secHandle, "SecAccessControlCreateWithFlags")
-		purego.RegisterLibFunc(&fnSecKeyCreateRandomKey, secHandle, "SecKeyCreateRandomKey")
-		purego.RegisterLibFunc(&fnSecKeyCopyPublicKey, secHandle, "SecKeyCopyPublicKey")
-		purego.RegisterLibFunc(&fnSecKeyCopyExternalRepresentation, secHandle, "SecKeyCopyExternalRepresentation")
-		purego.RegisterLibFunc(&fnSecKeyCreateSignature, secHandle, "SecKeyCreateSignature")
-		purego.RegisterLibFunc(&fnSecItemDelete, secHandle, "SecItemDelete")
-		purego.RegisterLibFunc(&fnSecItemCopyMatching, secHandle, "SecItemCopyMatching")
-		purego.RegisterLibFunc(&fnSecItemAdd, secHandle, "SecItemAdd")
-		purego.RegisterLibFunc(&fnCFErrorGetCode, cfHandle, "CFErrorGetCode")
-		purego.RegisterLibFunc(&fnCFErrorCopyDescription, cfHandle, "CFErrorCopyDescription")
-		purego.RegisterLibFunc(&fnCFStringGetCString, cfHandle, "CFStringGetCString")
+		purego.RegisterLibFunc(&fnSecAccessControlCreateWithFlags, sec, "SecAccessControlCreateWithFlags")
+		purego.RegisterLibFunc(&fnSecKeyCreateRandomKey, sec, "SecKeyCreateRandomKey")
+		purego.RegisterLibFunc(&fnSecKeyCopyPublicKey, sec, "SecKeyCopyPublicKey")
+		purego.RegisterLibFunc(&fnSecKeyCopyExternalRepresentation, sec, "SecKeyCopyExternalRepresentation")
+		purego.RegisterLibFunc(&fnSecKeyCreateSignature, sec, "SecKeyCreateSignature")
+		purego.RegisterLibFunc(&fnSecItemDelete, sec, "SecItemDelete")
+		purego.RegisterLibFunc(&fnSecItemCopyMatching, sec, "SecItemCopyMatching")
+		purego.RegisterLibFunc(&fnSecItemAdd, sec, "SecItemAdd")
 
-		// loadPtr loads a pointer-type CF/Sec constant (CFStringRef, etc.).
-		// Dlsym returns the address of the symbol; we dereference to get the actual value.
-		// derefUintptr is implemented in assembly to avoid go vet unsafeptr false positive.
-		loadPtr := func(handle uintptr, name string) uintptr {
-			sym, err := purego.Dlsym(handle, name)
+		// Pointer-typed constants (CFStringRef etc.): Dlsym returns the
+		// variable's address, which holds the value.
+		ptrs := []struct {
+			dst    *uintptr
+			handle uintptr
+			name   string
+		}{
+			{&kCFAllocatorDefault, cf, "kCFAllocatorDefault"},
+			{&kCFBooleanTrue, cf, "kCFBooleanTrue"},
+			{&kSecAttrKeyType, sec, "kSecAttrKeyType"},
+			{&kSecAttrKeyTypeECSECPrimeRandom, sec, "kSecAttrKeyTypeECSECPrimeRandom"},
+			{&kSecAttrKeySizeInBits, sec, "kSecAttrKeySizeInBits"},
+			{&kSecAttrKeyClass, sec, "kSecAttrKeyClass"},
+			{&kSecAttrKeyClassPrivate, sec, "kSecAttrKeyClassPrivate"},
+			{&kSecAttrTokenID, sec, "kSecAttrTokenID"},
+			{&kSecAttrTokenIDSecureEnclave, sec, "kSecAttrTokenIDSecureEnclave"},
+			{&kSecAttrAccessControl, sec, "kSecAttrAccessControl"},
+			{&kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, sec, "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly"},
+			{&kSecAttrLabel, sec, "kSecAttrLabel"},
+			{&kSecAttrApplicationTag, sec, "kSecAttrApplicationTag"},
+			{&kSecAttrIsPermanent, sec, "kSecAttrIsPermanent"},
+			{&kSecAttrService, sec, "kSecAttrService"},
+			{&kSecAttrAccount, sec, "kSecAttrAccount"},
+			{&kSecPrivateKeyAttrs, sec, "kSecPrivateKeyAttrs"},
+			{&kSecUseDataProtectionKeychain, sec, "kSecUseDataProtectionKeychain"},
+			{&kSecUseAuthenticationContext, sec, "kSecUseAuthenticationContext"},
+			{&kSecKeyAlgorithmECDSASignatureMessageX962SHA256, sec, "kSecKeyAlgorithmECDSASignatureMessageX962SHA256"},
+			{&kSecClass, sec, "kSecClass"},
+			{&kSecClassKey, sec, "kSecClassKey"},
+			{&kSecClassGenericPassword, sec, "kSecClassGenericPassword"},
+			{&kSecReturnRef, sec, "kSecReturnRef"},
+			{&kSecReturnData, sec, "kSecReturnData"},
+			{&kSecValueData, sec, "kSecValueData"},
+			{&kSecMatchLimit, sec, "kSecMatchLimit"},
+			{&kSecMatchLimitOne, sec, "kSecMatchLimitOne"},
+		}
+		for _, p := range ptrs {
+			sym, err := purego.Dlsym(p.handle, p.name)
 			if err != nil {
-				secErr = fmt.Errorf("darwin: Dlsym %s: %w", name, err)
-				return 0
+				secErr = fmt.Errorf("darwin: Dlsym %s: %w", p.name, err)
+				return
 			}
-			return derefUintptr(sym)
+			*p.dst = derefUintptr(sym)
 		}
-
-		kCFAllocatorDefault = loadPtr(cfHandle, "kCFAllocatorDefault")
-		kCFBooleanTrue = loadPtr(cfHandle, "kCFBooleanTrue")
-		kCFBooleanFalse = loadPtr(cfHandle, "kCFBooleanFalse")
-		kSecAttrKeyTypeECSECPrimeRandom = loadPtr(secHandle, "kSecAttrKeyTypeECSECPrimeRandom")
-		kSecAttrTokenIDSecureEnclave = loadPtr(secHandle, "kSecAttrTokenIDSecureEnclave")
-		kSecAttrKeyType = loadPtr(secHandle, "kSecAttrKeyType")
-		kSecAttrKeySizeInBits = loadPtr(secHandle, "kSecAttrKeySizeInBits")
-		kSecAttrTokenID = loadPtr(secHandle, "kSecAttrTokenID")
-		kSecAttrAccessControl = loadPtr(secHandle, "kSecAttrAccessControl")
-		kSecAttrLabel = loadPtr(secHandle, "kSecAttrLabel")
-		kSecAttrApplicationTag = loadPtr(secHandle, "kSecAttrApplicationTag")
-		kSecAttrIsPermanent = loadPtr(secHandle, "kSecAttrIsPermanent")
-		kSecUseDataProtectionKeychain = loadPtr(secHandle, "kSecUseDataProtectionKeychain")
-		kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly = loadPtr(secHandle, "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly")
-		kSecKeyAlgorithmECDSASignatureMessageX962SHA256 = loadPtr(secHandle, "kSecKeyAlgorithmECDSASignatureMessageX962SHA256")
-		kSecPrivateKeyAttrs = loadPtr(secHandle, "kSecPrivateKeyAttrs")
-		// kCFTypeDictionaryKeyCallBacks/ValueCallBacks are structs, not pointer-typed variables.
-		// Dlsym returns the struct's address directly — do NOT dereference (unlike CFStringRef constants).
-		sym, symErr := purego.Dlsym(cfHandle, "kCFTypeDictionaryKeyCallBacks")
-		if symErr != nil {
-			secErr = fmt.Errorf("darwin: Dlsym kCFTypeDictionaryKeyCallBacks: %w", symErr)
-			return
+		// The dictionary callbacks are structs: their address is the value. Do not dereference.
+		for _, p := range []struct {
+			dst  *uintptr
+			name string
+		}{
+			{&kCFTypeDictionaryKeyCallBacks, "kCFTypeDictionaryKeyCallBacks"},
+			{&kCFTypeDictionaryValueCallBacks, "kCFTypeDictionaryValueCallBacks"},
+		} {
+			sym, err := purego.Dlsym(cf, p.name)
+			if err != nil {
+				secErr = fmt.Errorf("darwin: Dlsym %s: %w", p.name, err)
+				return
+			}
+			*p.dst = sym
 		}
-		kCFTypeDictionaryKeyCallBacks = sym
-		sym, symErr = purego.Dlsym(cfHandle, "kCFTypeDictionaryValueCallBacks")
-		if symErr != nil {
-			secErr = fmt.Errorf("darwin: Dlsym kCFTypeDictionaryValueCallBacks: %w", symErr)
-			return
-		}
-		kCFTypeDictionaryValueCallBacks = sym
-		kSecClass = loadPtr(secHandle, "kSecClass")
-		kSecClassKey = loadPtr(secHandle, "kSecClassKey")
-		kSecReturnRef = loadPtr(secHandle, "kSecReturnRef")
-		kSecMatchLimit = loadPtr(secHandle, "kSecMatchLimit")
-		kSecMatchLimitOne = loadPtr(secHandle, "kSecMatchLimitOne")
-		kSecValueRef = loadPtr(secHandle, "kSecValueRef")
-
 	})
+	return secErr
 }
 
-// cfErrorString extracts a human-readable description from a CFErrorRef.
-func cfErrorString(e cfErrorRef) string {
-	if e == 0 {
-		return "unknown"
+func release(ref cfTypeRef) {
+	if ref != 0 {
+		fnCFRelease(ref)
 	}
-	code := fnCFErrorGetCode(e)
-	desc := fnCFErrorCopyDescription(e)
-	if desc == 0 {
-		return fmt.Sprintf("code=%d", code)
+}
+
+// cfStringToGo copies a CFString into a Go string.
+func cfStringToGo(s cfStringRef) string {
+	if s == 0 {
+		return ""
 	}
-	defer fnCFRelease(cfTypeRef(desc))
-	buf := make([]byte, 256)
-	fnCFStringGetCString(desc, uintptr(unsafe.Pointer(&buf[0])), len(buf), kCFStringEncodingUTF8)
-	msg := string(buf[:])
-	if i := len(msg); i > 0 {
-		for i > 0 && msg[i-1] == 0 {
-			i--
+	size := fnCFStringGetMaximumSizeForEncoding(fnCFStringGetLength(s), kCFStringEncodingUTF8) + 1
+	buf := make([]byte, size)
+	if !fnCFStringGetCString(s, uintptr(unsafe.Pointer(&buf[0])), size, kCFStringEncodingUTF8) {
+		return ""
+	}
+	for i, b := range buf {
+		if b == 0 {
+			return string(buf[:i])
 		}
-		msg = msg[:i]
 	}
-	return fmt.Sprintf("code=%d %s", code, msg)
+	return string(buf)
 }
 
-// cfString creates a CFStringRef from a Go string. Caller must CFRelease.
+// cfErr converts a CFErrorRef into a SecError and releases it.
+func cfErr(op string, e cfErrorRef) error {
+	if e == 0 {
+		return &SecError{Op: op, Desc: "unknown error"}
+	}
+	defer release(cfTypeRef(e))
+	se := &SecError{Op: op, Status: fnCFErrorGetCode(e)}
+	if desc := fnCFErrorCopyDescription(e); desc != 0 {
+		se.Desc = cfStringToGo(desc)
+		release(cfTypeRef(desc))
+	}
+	return se
+}
+
 func cfString(s string) cfStringRef {
 	cstr := append([]byte(s), 0)
 	return fnCFStringCreateWithCString(kCFAllocatorDefault, uintptr(unsafe.Pointer(&cstr[0])), kCFStringEncodingUTF8)
 }
 
-// cfData creates a CFDataRef from a []byte. Caller must CFRelease.
 func cfData(b []byte) cfDataRef {
 	if len(b) == 0 {
 		return fnCFDataCreate(kCFAllocatorDefault, 0, 0)
@@ -225,210 +253,267 @@ func cfData(b []byte) cfDataRef {
 	return fnCFDataCreate(kCFAllocatorDefault, uintptr(unsafe.Pointer(&b[0])), len(b))
 }
 
-// cfDataToBytes copies CFData contents to a Go []byte and releases the CFData.
-// The CFDataGetBytePtr return value is a C pointer to CF-managed memory.
-// We use a fixed-size array type routed through derefBytesN (assembly) to copy
-// the bytes without triggering go vet unsafeptr on the C pointer.
+// cfDataToBytes copies CFData into Go memory and releases it.
 func cfDataToBytes(data cfDataRef) []byte {
 	if data == 0 {
 		return nil
 	}
-	defer fnCFRelease(cfTypeRef(data))
-	n := fnCFDataGetLength(data)
-	if n == 0 {
-		return nil
-	}
-	ptr := fnCFDataGetBytePtr(data)
-	return copyBytesFromC(ptr, n)
+	defer release(cfTypeRef(data))
+	return copyBytesFromC(fnCFDataGetBytePtr(data), fnCFDataGetLength(data))
 }
 
-// cfInt32 creates a CFNumberRef for an int32. Caller must CFRelease.
 func cfInt32(n int32) cfNumberRef {
 	return fnCFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, uintptr(unsafe.Pointer(&n)))
 }
 
-// cfMutableDict creates an empty CFMutableDictionary. Caller must CFRelease.
-func cfMutableDict(capacity int) cfMutableDictionaryRef {
-	return fnCFDictionaryCreateMutable(kCFAllocatorDefault, capacity, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks)
+// dict is a CFMutableDictionary that also owns the CF objects added to it.
+type dict struct {
+	ref   cfMutableDictionaryRef
+	owned []cfTypeRef
 }
 
-// dictSet adds a key-value pair to a CFMutableDictionary.
-func dictSet(dict cfMutableDictionaryRef, key, value uintptr) {
-	fnCFDictionaryAddValue(dict, key, value)
+func newDict() *dict {
+	return &dict{ref: fnCFDictionaryCreateMutable(kCFAllocatorDefault, 0, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks)}
 }
 
-// GenerateCredentialID generates a random 32-byte credential ID.
-func GenerateCredentialID() ([]byte, error) {
-	id := make([]byte, 32)
-	if _, err := rand.Read(id); err != nil {
-		return nil, fmt.Errorf("darwin: generate credential ID: %w", err)
+func (d *dict) set(key, value uintptr) *dict {
+	fnCFDictionaryAddValue(d.ref, key, value)
+	return d
+}
+
+// setOwned adds a CF object that the dictionary's owner created and must release.
+func (d *dict) setOwned(key uintptr, value cfTypeRef) *dict {
+	d.owned = append(d.owned, value)
+	return d.set(key, uintptr(value))
+}
+
+func (d *dict) release() {
+	for _, o := range d.owned {
+		release(o)
 	}
-	return id, nil
+	release(cfTypeRef(d.ref))
 }
 
-// CreateBiometricKey creates an EC P-256 key stored in the default Keychain.
-// Biometric verification is handled separately by the caller (LAContext.evaluatePolicy)
-// before calling Sign. This avoids the keychain-access-groups entitlement required
-// for Secure Enclave or access-control-bound keys.
-// label is used as kSecAttrLabel. tag is used as kSecAttrApplicationTag for Keychain lookup.
-// Returns the private key ref (caller must CFRelease via ReleaseKey).
-func CreateBiometricKey(label string, tag []byte) (secKeyRef, error) {
-	loadSecurity()
-	if secErr != nil {
-		return 0, secErr
+func (d *dict) cf() cfDictionaryRef { return cfDictionaryRef(d.ref) }
+
+// KeyOptions selects where a key lives.
+type KeyOptions struct {
+	// SecureEnclave creates the key in the Secure Enclave, usable only after
+	// biometric authentication (needs a signed app with the
+	// keychain-access-groups entitlement). Otherwise the key is a software key
+	// in the login Keychain without an OS-enforced access policy.
+	SecureEnclave bool
+}
+
+// CreateKey creates a permanent EC P-256 private key tagged with tag and
+// returns its uncompressed public point.
+func CreateKey(label string, tag []byte, opts KeyOptions) ([]byte, error) {
+	if err := loadSecurity(); err != nil {
+		return nil, err
 	}
+	privAttrs := newDict()
+	defer privAttrs.release()
+	privAttrs.set(kSecAttrIsPermanent, kCFBooleanTrue).
+		setOwned(kSecAttrApplicationTag, cfTypeRef(cfData(tag))).
+		setOwned(kSecAttrLabel, cfTypeRef(cfString(label)))
 
-	cfLabel := cfString(label)
-	defer fnCFRelease(cfTypeRef(cfLabel))
+	params := newDict()
+	defer params.release()
+	params.set(kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom).
+		setOwned(kSecAttrKeySizeInBits, cfTypeRef(cfInt32(256)))
 
-	cfTag := cfData(tag)
-	defer fnCFRelease(cfTypeRef(cfTag))
-
-	keySizeBits := cfInt32(256)
-	defer fnCFRelease(cfTypeRef(keySizeBits))
-
-	// Private key attributes: permanent storage, tagged for later lookup.
-	privAttrs := cfMutableDict(4)
-	defer fnCFRelease(cfTypeRef(privAttrs))
-	dictSet(privAttrs, kSecAttrIsPermanent, kCFBooleanTrue)
-	dictSet(privAttrs, kSecAttrApplicationTag, uintptr(cfTag))
-	dictSet(privAttrs, kSecAttrLabel, uintptr(cfLabel))
-
-	params := cfMutableDict(5)
-	defer fnCFRelease(cfTypeRef(params))
-	dictSet(params, kSecAttrKeyType, uintptr(kSecAttrKeyTypeECSECPrimeRandom))
-	dictSet(params, kSecAttrKeySizeInBits, uintptr(keySizeBits))
-	dictSet(params, kSecPrivateKeyAttrs, uintptr(privAttrs))
+	if opts.SecureEnclave {
+		var acErr cfErrorRef
+		ac := fnSecAccessControlCreateWithFlags(kCFAllocatorDefault, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+			kSecAccessControlBiometryCurrentSet|kSecAccessControlPrivateKeyUsage, &acErr)
+		if ac == 0 {
+			return nil, cfErr("SecAccessControlCreateWithFlags", acErr)
+		}
+		privAttrs.setOwned(kSecAttrAccessControl, cfTypeRef(ac))
+		params.set(kSecAttrTokenID, kSecAttrTokenIDSecureEnclave).
+			set(kSecUseDataProtectionKeychain, kCFBooleanTrue)
+	}
+	params.set(kSecPrivateKeyAttrs, uintptr(privAttrs.ref))
 
 	var keyErr cfErrorRef
-	defer func() {
-		if keyErr != 0 {
-			fnCFRelease(cfTypeRef(keyErr))
-		}
-	}()
-	key := fnSecKeyCreateRandomKey(cfDictionaryRef(params), &keyErr)
+	key := fnSecKeyCreateRandomKey(params.cf(), &keyErr)
 	if key == 0 {
-		return 0, fmt.Errorf("darwin: SecKeyCreateRandomKey failed: %s", cfErrorString(keyErr))
+		return nil, cfErr("SecKeyCreateRandomKey", keyErr)
 	}
-	return key, nil
+	defer release(cfTypeRef(key))
+	raw, err := publicKeyRaw(key)
+	if err != nil {
+		_ = DeleteKey(tag, opts)
+		return nil, err
+	}
+	return raw, nil
 }
 
-// SecKeyRefValue is an opaque handle to a SecKey object.
-// Callers must call ReleaseKey when done.
-type SecKeyRefValue = secKeyRef
-
-// ReleaseKey releases a SecKey CF object.
-func ReleaseKey(key secKeyRef) {
-	if key != 0 {
-		fnCFRelease(cfTypeRef(key))
+// publicKeyRaw returns the 65-byte uncompressed public point of a private key.
+func publicKeyRaw(priv secKeyRef) ([]byte, error) {
+	pub := fnSecKeyCopyPublicKey(priv)
+	if pub == 0 {
+		return nil, &SecError{Op: "SecKeyCopyPublicKey", Desc: "no public key"}
 	}
-}
-
-// ExportPublicKeyCOSE exports the public key of a Secure Enclave key in COSE ES256 format.
-// The raw EC public key from Apple is 65 bytes: 0x04 || X (32) || Y (32).
-func ExportPublicKeyCOSE(privKey secKeyRef) ([]byte, error) {
-	pubKey := fnSecKeyCopyPublicKey(privKey)
-	if pubKey == 0 {
-		return nil, fmt.Errorf("darwin: SecKeyCopyPublicKey returned nil")
-	}
-	defer fnCFRelease(cfTypeRef(pubKey))
-
+	defer release(cfTypeRef(pub))
 	var exportErr cfErrorRef
-	defer func() {
-		if exportErr != 0 {
-			fnCFRelease(cfTypeRef(exportErr))
-		}
-	}()
-	rawData := fnSecKeyCopyExternalRepresentation(pubKey, &exportErr)
-	if rawData == 0 {
-		return nil, fmt.Errorf("darwin: SecKeyCopyExternalRepresentation failed")
+	data := fnSecKeyCopyExternalRepresentation(pub, &exportErr)
+	if data == 0 {
+		return nil, cfErr("SecKeyCopyExternalRepresentation", exportErr)
 	}
-	raw := cfDataToBytes(rawData) // releases rawData
-
+	raw := cfDataToBytes(data)
 	if len(raw) != 65 || raw[0] != 0x04 {
-		return nil, fmt.Errorf("darwin: unexpected public key format (len=%d)", len(raw))
+		return nil, &SecError{Op: "SecKeyCopyExternalRepresentation", Desc: fmt.Sprintf("unexpected public key format (len=%d)", len(raw))}
 	}
-	x := raw[1:33]
-	y := raw[33:65]
-
-	// COSE ES256 map:
-	//  1: 2    (kty: EC2)
-	//  3: -7   (alg: ES256)
-	// -1: 1    (crv: P-256)
-	// -2: x    (x coordinate)
-	// -3: y    (y coordinate)
-	cose := EncodeMap(
-		EncodeUint(1), EncodeUint(2),
-		EncodeUint(3), EncodeNegInt(6), // -7 = negint(6)
-		EncodeNegInt(0), EncodeUint(1), // -1 = negint(0), crv P-256 = 1
-		EncodeNegInt(1), EncodeBytes(x), // -2 = negint(1), x
-		EncodeNegInt(2), EncodeBytes(y), // -3 = negint(2), y
-	)
-	return cose, nil
+	return raw, nil
 }
 
-// Sign signs dataToSign with the Secure Enclave key using ECDSA-SHA256.
-// Returns DER-encoded signature. The OS will show a biometric prompt.
-func Sign(privKey secKeyRef, dataToSign []byte) ([]byte, error) {
-	// Use the loaded CF constant for the algorithm string.
-	alg := cfStringRef(kSecKeyAlgorithmECDSASignatureMessageX962SHA256)
-
-	data := cfData(dataToSign)
-	defer fnCFRelease(cfTypeRef(data))
-
-	var sigErr cfErrorRef
-	defer func() {
-		if sigErr != 0 {
-			fnCFRelease(cfTypeRef(sigErr))
-		}
-	}()
-	sigData := fnSecKeyCreateSignature(privKey, alg, data, &sigErr)
-	if sigData == 0 {
-		return nil, fmt.Errorf("darwin: SecKeyCreateSignature failed")
+func keyQuery(tag []byte, opts KeyOptions) *dict {
+	q := newDict()
+	q.set(kSecClass, kSecClassKey).
+		set(kSecAttrKeyClass, kSecAttrKeyClassPrivate).
+		setOwned(kSecAttrApplicationTag, cfTypeRef(cfData(tag)))
+	if opts.SecureEnclave {
+		q.set(kSecUseDataProtectionKeychain, kCFBooleanTrue)
 	}
-	return cfDataToBytes(sigData), nil
+	return q
 }
 
-// LookupPrivateKey finds a Secure Enclave private key in the Keychain by tag.
-func LookupPrivateKey(tag []byte) (secKeyRef, error) {
-	loadSecurity()
-	if secErr != nil {
-		return 0, secErr
+// KeyExists reports whether a private key with tag exists, without authenticating.
+func KeyExists(tag []byte, opts KeyOptions) (bool, error) {
+	if err := loadSecurity(); err != nil {
+		return false, err
 	}
+	q := keyQuery(tag, opts)
+	defer q.release()
+	q.set(kSecMatchLimit, kSecMatchLimitOne)
+	switch status := fnSecItemCopyMatching(q.cf(), nil); status {
+	case errSecSuccess:
+		return true, nil
+	case errSecItemNotFound:
+		return false, nil
+	default:
+		return false, &SecError{Op: "SecItemCopyMatching", Status: int64(status)}
+	}
+}
 
-	cfTag := cfData(tag)
-	defer fnCFRelease(cfTypeRef(cfTag))
-
-	query := cfMutableDict(5)
-	defer fnCFRelease(cfTypeRef(query))
-	dictSet(query, kSecClass, uintptr(kSecClassKey))
-	dictSet(query, kSecAttrApplicationTag, uintptr(cfTag))
-	dictSet(query, kSecReturnRef, kCFBooleanTrue)
-	dictSet(query, kSecMatchLimit, uintptr(kSecMatchLimitOne))
-
+// Sign signs data with ECDSA-SHA256 using the key tagged tag and returns a
+// DER signature. auth, when non-nil, is an LAContext the user already
+// authenticated, which a Secure Enclave key requires instead of prompting again.
+func Sign(tag []byte, opts KeyOptions, auth *LAContext, data []byte) ([]byte, error) {
+	if err := loadSecurity(); err != nil {
+		return nil, err
+	}
+	q := keyQuery(tag, opts)
+	defer q.release()
+	q.set(kSecReturnRef, kCFBooleanTrue).set(kSecMatchLimit, kSecMatchLimitOne)
+	if auth != nil && opts.SecureEnclave {
+		q.set(kSecUseAuthenticationContext, uintptr(auth.ID()))
+	}
 	var result uintptr
-	status := fnSecItemCopyMatching(cfDictionaryRef(query), &result)
-	if status == errSecItemNotFound {
-		return 0, fmt.Errorf("darwin: credential not found in keychain")
+	switch status := fnSecItemCopyMatching(q.cf(), &result); status {
+	case errSecSuccess:
+	case errSecItemNotFound:
+		return nil, ErrNotFound
+	default:
+		return nil, &SecError{Op: "SecItemCopyMatching", Status: int64(status)}
 	}
-	if status != errSecSuccess {
-		return 0, fmt.Errorf("darwin: SecItemCopyMatching status=%d", status)
+	key := secKeyRef(result)
+	defer release(cfTypeRef(key))
+
+	in := cfData(data)
+	defer release(cfTypeRef(in))
+	var sigErr cfErrorRef
+	sig := fnSecKeyCreateSignature(key, cfStringRef(kSecKeyAlgorithmECDSASignatureMessageX962SHA256), in, &sigErr)
+	if sig == 0 {
+		return nil, cfErr("SecKeyCreateSignature", sigErr)
 	}
-	return secKeyRef(result), nil
+	return cfDataToBytes(sig), nil
 }
 
-// KeychainTag builds the Keychain application tag from rpID and credentialID.
-func KeychainTag(rpID string, credentialID []byte) []byte {
-	tag := []byte("bio:" + rpID + ":")
-	tag = append(tag, credentialID...)
-	return tag
+// DeleteKey deletes the private key tagged tag. It returns ErrNotFound if there is none.
+func DeleteKey(tag []byte, opts KeyOptions) error {
+	if err := loadSecurity(); err != nil {
+		return err
+	}
+	q := keyQuery(tag, opts)
+	defer q.release()
+	return deleteStatus(fnSecItemDelete(q.cf()))
 }
 
-// CredentialIDFromTag extracts the credential ID from a Keychain tag.
-func CredentialIDFromTag(tag []byte, rpID string) []byte {
-	prefix := []byte("bio:" + rpID + ":")
-	if len(tag) <= len(prefix) {
+func deleteStatus(status int32) error {
+	switch status {
+	case errSecSuccess:
 		return nil
+	case errSecItemNotFound:
+		return ErrNotFound
+	default:
+		return &SecError{Op: "SecItemDelete", Status: int64(status)}
 	}
-	return tag[len(prefix):]
+}
+
+// The user handle is kept in a generic password item next to the key,
+// because key items have no attribute for arbitrary data.
+
+func dataQuery(service string, account []byte, opts KeyOptions) *dict {
+	q := newDict()
+	q.set(kSecClass, kSecClassGenericPassword).
+		setOwned(kSecAttrService, cfTypeRef(cfString(service))).
+		setOwned(kSecAttrAccount, cfTypeRef(cfString(base64.RawURLEncoding.EncodeToString(account))))
+	if opts.SecureEnclave {
+		q.set(kSecUseDataProtectionKeychain, kCFBooleanTrue)
+	}
+	return q
+}
+
+// StoreData stores value under (service, account), replacing any existing item.
+func StoreData(service string, account, value []byte, opts KeyOptions) error {
+	if err := loadSecurity(); err != nil {
+		return err
+	}
+	if err := DeleteData(service, account, opts); err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	q := dataQuery(service, account, opts)
+	defer q.release()
+	q.setOwned(kSecValueData, cfTypeRef(cfData(value)))
+	if status := fnSecItemAdd(q.cf(), nil); status != errSecSuccess {
+		return &SecError{Op: "SecItemAdd", Status: int64(status)}
+	}
+	return nil
+}
+
+// LoadData returns the value stored under (service, account), or ErrNotFound.
+func LoadData(service string, account []byte, opts KeyOptions) ([]byte, error) {
+	if err := loadSecurity(); err != nil {
+		return nil, err
+	}
+	q := dataQuery(service, account, opts)
+	defer q.release()
+	q.set(kSecReturnData, kCFBooleanTrue).set(kSecMatchLimit, kSecMatchLimitOne)
+	var result uintptr
+	switch status := fnSecItemCopyMatching(q.cf(), &result); status {
+	case errSecSuccess:
+		return cfDataToBytes(cfDataRef(result)), nil
+	case errSecItemNotFound:
+		return nil, ErrNotFound
+	default:
+		return nil, &SecError{Op: "SecItemCopyMatching", Status: int64(status)}
+	}
+}
+
+// DeleteData deletes the item under (service, account). It returns ErrNotFound if there is none.
+func DeleteData(service string, account []byte, opts KeyOptions) error {
+	if err := loadSecurity(); err != nil {
+		return err
+	}
+	q := dataQuery(service, account, opts)
+	defer q.release()
+	return deleteStatus(fnSecItemDelete(q.cf()))
+}
+
+// KeychainTag builds the application tag for a credential.
+func KeychainTag(namespace, rpID string, credentialID []byte) []byte {
+	tag := []byte(namespace + ":" + rpID + ":")
+	return append(tag, credentialID...)
 }
